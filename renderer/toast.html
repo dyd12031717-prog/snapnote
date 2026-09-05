@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>提醒</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent; overflow: hidden;
+    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; }
+  .card {
+    width: 100%; height: 100%; padding: 16px 18px;
+    background: rgba(15, 23, 38, .96);
+    border: 1px solid rgba(255, 255, 255, .12);
+    border-radius: 14px; cursor: pointer;
+    display: flex; align-items: center; gap: 13px;
+    animation: slidein .25s ease-out;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .45);
+  }
+  @keyframes slidein { from { transform: translateX(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .icon {
+    width: 40px; height: 40px; flex: none;
+    background: linear-gradient(180deg, #FBC536, #F39C12);
+    border-radius: 11px; position: relative;
+  }
+  .icon:before, .icon:after {
+    content: ''; position: absolute; left: 10px; height: 2.6px;
+    background: rgba(255, 246, 222, .95); border-radius: 2px;
+  }
+  .icon:before { top: 14px; width: 20px; }
+  .icon:after { top: 22px; width: 13px; }
+  .txt { flex: 1; min-width: 0; }
+  .t1 { font-size: 14px; font-weight: 700; color: #F2F6FB; }
+  .t2 { font-size: 12px; color: #93A7C4; margin-top: 5px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .go { font-size: 11.5px; color: #7AB6F0; font-weight: 600; flex: none; }
+</style>
+</head>
+<body>
+<div class="card" id="card">
+  <div class="icon"></div>
+  <div class="txt">
+    <div class="t1" id="title">…</div>
+    <div class="t2" id="body">…</div>
+  </div>
+  <div class="go">点击查看 ›</div>
+</div>
+<script>
+  (function () {
+    const api = window.snapnote || window.__SNAPNOTE_MOCK__;
+    const t = document.getElementById('title');
+    const b = document.getElementById('body');
+    function fill(data) {
+      t.textContent = data.title || '';
+      b.textContent = data.body || '';
+    }
+    if (api && api.onToast) api.onToast(fill);
+    if (api && api.ready) api.ready().then(() => {}).catch(() => {});
+    document.getElementById('card').addEventListener('click', () => {
+      if (api && api.toastClick) api.toastClick();
+    });
+  })();
+</script>
+</body>
+</html>

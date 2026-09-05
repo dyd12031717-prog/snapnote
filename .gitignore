@@ -1,0 +1,26 @@
+# 依赖与构建产物
+node_modules/
+release/
+dist/
+
+# 运行时临时目录
+.tmp-smoke/
+
+# 设计稿字体（SIL OFL，体积大，按需自行下载 Noto Sans SC）
+design/mockups/fonts/
+
+# 开发验证中间产物
+verify/
+docs/_qa_*
+docs/cover.pdf
+docs/cover.html
+docs/prd_body.pdf
+docs/build_prd.py
+docs/build_run.py
+docs/merge_final.py
+design/mockups/vlm_check*.json
+
+# 杂项
+*.log
+.DS_Store
+Thumbs.db

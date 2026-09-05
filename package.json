@@ -1,0 +1,49 @@
+{
+  "name": "snapnote",
+  "productName": "磁吸便签 SnapNote",
+  "version": "1.0.0",
+  "description": "贴在屏幕右缘的轻量任务便签：开机提醒今日任务，快捷键随叫随到，用完自动磁吸回边缘",
+  "author": "SnapNote 项目组",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/store.test.js tests/timeparse.test.js tests/scheduler.test.js tests/main.test.js",
+    "check": "node electron/scripts/check.js",
+    "smoke": "electron . --smoke-test",
+    "dist": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.snapnote.app",
+    "productName": "SnapNote",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/**/*",
+      "assets/**/*"
+    ],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "磁吸便签 SnapNote",
+      "artifactName": "SnapNote-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "SnapNote-Portable-${version}.${ext}"
+    }
+  }
+}

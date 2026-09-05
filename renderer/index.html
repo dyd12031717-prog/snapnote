@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'">
+<title>磁吸便签</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body class="mode-handle">
+  <div id="stage" class="stage">
+
+    <!-- 贴边把手：贴住屏幕最右缘 -->
+    <div id="handle" class="handle" title="点我，或按 Ctrl+Alt+N 展开">
+      <div class="dot" id="handleDot"></div>
+      <div class="vtext">今日</div>
+      <div class="badge" id="handleBadge">0</div>
+    </div>
+
+    <!-- 展开便签 -->
+    <div id="note" class="note">
+      <div class="note-head">
+        <div class="nh-left">
+          <div class="nh-title">磁吸便签</div>
+          <div class="nh-sub" id="noteSub">记下要做的事，到点我会提醒你</div>
+        </div>
+        <button class="nh-btn" id="btnSettings" title="设置">设</button>
+        <button class="nh-btn" id="btnDock" title="收起（Esc）">»</button>
+      </div>
+
+      <div class="note-list" id="taskList">
+        <div class="empty" id="emptyState">
+          <div class="empty-emoji">✎</div>
+          <div>今天还没有任务</div>
+          <div class="empty-sub">在下方记下第一件事吧</div>
+        </div>
+      </div>
+
+      <div class="note-input">
+        <input id="taskInput" type="text" maxlength="200" placeholder="要做什么？回车记下…"
+               autocomplete="off" spellcheck="false">
+        <div class="chips" id="chips">
+          <!-- 快捷时间胶囊由 app.js 生成 -->
+        </div>
+        <div class="custom-row" id="customRow" hidden>
+          <input type="datetime-local" id="customTime">
+          <button class="chip chip-plain" id="customClear">取消</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+  <script src="app.js" defer></script>
+</body>
+</html>
