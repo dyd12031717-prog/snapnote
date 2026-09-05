@@ -34,6 +34,7 @@
       "assets/**/*"
     ],
     "win": {
+      "artifactName": "SnapNote-Portable-${version}-win-${arch}.${ext}",
       "target": [
         { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
