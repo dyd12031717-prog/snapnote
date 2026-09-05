@@ -77,6 +77,7 @@ const app = {
   requestSingleInstanceLock() { return true; },
   on: (ev, cb) => state.appHandlers.on(ev, cb),
   whenReady() { return Promise.resolve(); },
+  getVersion() { return require('../../package.json').version; },
   getPath() { return process.env.SNAPNOTE_MOCK_USER_DATA || '/tmp/snapnote-mock'; },
   setLoginItemSettings(o) { state.loginItems = o; },
   exit(code) { app.exitCode = code; state.appHandlers.emit('__exit', code); },

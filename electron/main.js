@@ -13,6 +13,7 @@ const fs = require('fs');
 
 const { Store } = require('./lib/store');
 const { Scheduler } = require('./lib/scheduler');
+const { Updater } = require('./lib/updater');
 const TimeFmt = require('./lib/timeparse');
 
 const IS_SMOKE = process.argv.includes('--smoke-test');
@@ -48,6 +49,105 @@ if (IS_SMOKE) {
 }
 const store = new Store(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'));
 const scheduler = new Scheduler(store, onTaskDue);
+
+// ============================================================ 自动更新（便携版）
+const pkg = require('../package.json');
+const appDir = app.isPackaged ? path.dirname(process.execPath) : ROOT;
+const updater = new Updater({
+  owner: pkg.repository && pkg.repository.owner,
+  repo: pkg.repository && pkg.repository.repo,
+  currentVersion: app.getVersion(),
+  appDir,
+  exeBase: pkg.build.productName || 'SnapNote',
+  deps: { log: (...a) => console.log('[updater]', ...a) },
+});
+const UPDATER_ON = !IS_SMOKE && updater.enabled;
+
+function updaterMenuTemplate() {
+  if (!UPDATER_ON) return [];
+  const labelFor = () => {
+    switch (updater.state) {
+      case 'has-update': return `发现新版本 v${updater.lastCheck.version}，点击下载`;
+      case 'downloading': return `正在下载… ${updater.progressPct || 0}%`;
+      case 'ready': return '下载完成，重启并更新 ▸';
+      case 'error': return '更新检查失败，点击重试';
+      default: return '检查更新';
+    }
+  };
+  return [{ label: labelFor(), click: onUpdaterMenu }];
+}
+
+function refreshTray() { if (tray && tray._rebuild) tray._rebuild(); }
+
+function notifyUpdate(title, body, clickFn) {
+  if (!Notification.isSupported()) return;
+  const n = new Notification({ title, body });
+  if (clickFn) n.on('click', clickFn);
+  n.show();
+}
+
+async function checkForUpdate(manual) {
+  if (updater.state === 'downloading' || updater.state === 'ready') return;
+  try {
+    const info = await updater.check();
+    if (!info || !info.hasUpdate) {
+      updater.state = 'idle';
+      refreshTray();
+      if (manual) notifyUpdate('已是最新版本', `当前 v${updater.currentVersion}`);
+      return;
+    }
+    updater.state = 'has-update';
+    refreshTray();
+    notifyUpdate(
+      `发现新版本 v${info.version}`,
+      '点击立即下载，下载完成后一键重启更新',
+      startDownload,
+    );
+  } catch (e) {
+    updater.state = 'error';
+    refreshTray();
+    if (manual) notifyUpdate('更新检查失败', '网络异常或 GitHub 暂不可达，稍后再试');
+  }
+}
+
+async function startDownload() {
+  if (updater.state !== 'has-update' || !updater.lastCheck) return;
+  updater.state = 'downloading';
+  updater.progressPct = 0;
+  refreshTray();
+  let lastUi = 0;
+  try {
+    await updater.download((done, total) => {
+      const pct = total ? Math.floor((done / total) * 100) : 0;
+      if (pct !== updater.progressPct && Date.now() - lastUi > 500) {
+        updater.progressPct = pct;
+        lastUi = Date.now();
+        refreshTray();
+      }
+    });
+    updater.state = 'ready';
+    refreshTray();
+    notifyUpdate('新版本就绪', '点击立即重启并完成更新', restartToUpdate);
+  } catch (e) {
+    updater.state = 'error';
+    refreshTray();
+    notifyUpdate('下载失败', '网络异常，可稍后从托盘菜单重试');
+  }
+}
+
+function restartToUpdate() {
+  if (updater.state !== 'ready') return;
+  if (updater.applyAndRestart()) app.quit();
+}
+
+function onUpdaterMenu() {
+  switch (updater.state) {
+    case 'has-update': return startDownload();
+    case 'ready': return restartToUpdate();
+    case 'error': return checkForUpdate(true);
+    default: return checkForUpdate(true);
+  }
+}
 
 // ============================================================ 布局
 function workArea() { return screen.getPrimaryDisplay().workArea; }
@@ -285,6 +385,7 @@ function createTray() {
   tray.on('click', toggleMagnet);
   const rebuild = () => {
     tray.setContextMenu(Menu.buildFromTemplate([
+      ...updaterMenuTemplate(),
       { label: '打开便签', click: expand },
       { label: '设置…', click: createSettingsWindow },
       { type: 'separator' },
@@ -363,6 +464,13 @@ if (!app.requestSingleInstanceLock()) {
     if (IS_SMOKE) {
       runSmoke().catch(err => { console.error(err); app.exit(1); });
       return;
+    }
+
+    // 自动更新：清理上次更新残留，启动 15 秒后台静默检查一次
+    updater.cleanupStale();
+    if (UPDATER_ON) {
+      const checkTimer = setTimeout(() => { checkForUpdate(false); }, 15000);
+      if (checkTimer.unref) checkTimer.unref();
     }
 
     firstRunNotice();

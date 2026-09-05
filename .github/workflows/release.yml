@@ -1,0 +1,55 @@
+name: release
+
+# 推送 v* 标签时自动构建 Windows 便携包并发布 GitHub Release
+# 也可在 Actions 页面手动触发（workflow_dispatch）
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 注入仓库所有者与版本号（供应用内自动更新定位 Releases API）
+        shell: bash
+        run: |
+          OWNER='${{ github.repository_owner }}'
+          TAG="${GITHUB_REF_NAME#v}"
+          if [ -n "$TAG" ]; then
+            npm version "$TAG" --no-git-tag-version --allow-same-version
+          fi
+          node -e "
+            const fs = require('fs');
+            const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            p.repository = p.repository || { type: 'github' };
+            p.repository.owner = '$OWNER';
+            fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
+          "
+
+      - name: 安装依赖
+        run: npm install --no-fund --no-audit
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 构建 Windows 便携包
+        run: npx electron-builder --win zip --x64
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: 发布 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/SnapNote-Portable-*-win-x64.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true

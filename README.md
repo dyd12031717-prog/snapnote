@@ -25,6 +25,17 @@ npm run dist
 
 产物在 `release/` 目录：`SnapNote-Setup-1.0.0.exe`（安装版）与便携版 zip。
 
+### 自动更新（v1.1.0+）
+
+便携版内置自动更新，装好之后再也不用手动下载解压覆盖：
+
+- 启动约 15 秒后自动静默检查本仓库 Releases（也支持托盘右键 → **检查更新**）
+- 发现新版本 → 系统通知弹出，点击即开始**后台下载**
+- 下载完成 → 通知点击 **重启并更新**：程序自动替换自身并重启，任务数据完好保留
+- 更新只访问 GitHub，无需账号密码，开发态（`npm start`）自动禁用
+
+> 发布流程：推送 `v*` 标签 → GitHub Actions 自动构建 → 产出新便携 zip 并发布 Release。
+
 ---
 
 ## 日常使用
@@ -66,7 +77,7 @@ Windows 登录后约 8 秒，屏幕**右上角**滑入今日任务摘要卡片
 ```bash
 npm install          # 安装依赖（首次含 Electron 二进制下载）
 npm start            # 启动应用
-npm test             # 20 项单元与主进程逻辑测试
+npm test             # 34 项单元与主进程逻辑测试
 npm run check        # 全源码语法检查
 npm run smoke        # 应用级冒烟自检（贴边/展开/收回/调度/Toast）
 python3 scripts/verify_ui.py   # 渲染层 UI 无头验证 + 截图
@@ -77,14 +88,16 @@ python3 scripts/verify_ui.py   # 渲染层 UI 无头验证 + 截图
 ```
 snapnote/
 ├─ electron/           # 主进程
-│  ├─ main.js          # 窗口/磁吸动画/托盘/快捷键/自启/IPC
+│  ├─ main.js          # 窗口/磁吸动画/托盘/快捷键/自启/IPC/自动更新
 │  ├─ preload.js       # 安全渲染桥（contextIsolation）
 │  ├─ lib/store.js     # 任务存储（原子写 + .bak 回退）
 │  ├─ lib/scheduler.js # 到点提醒调度
-│  └─ lib/timeparse.js # 时间胶囊/过期判断
+│  ├─ lib/timeparse.js # 时间胶囊/过期判断
+│  └─ lib/updater.js   # 便携版自动更新（检查/下载/替换重启）
 ├─ renderer/           # 渲染层（便签 / Toast / 设置）
 ├─ tests/              # 单元测试 + Electron mock 桩
 ├─ scripts/verify_ui.py# 无头 UI 验证
+├─ .github/workflows/  # CI：打 tag 自动构建并发布 Release
 ├─ assets/             # 应用图标 / 托盘图标
 └─ docs/               # PRD 文档与设计源文件
 ```
