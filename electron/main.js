@@ -19,6 +19,11 @@ const TimeFmt = require('./lib/timeparse');
 const IS_SMOKE = process.argv.includes('--smoke-test');
 const FAST = IS_SMOKE || process.env.SNAPNOTE_FAST === '1'; // 测试/演示用：缩短收起与 Toast 延时
 
+// 冒烟/CI 无 GPU 环境禁用硬件加速，避免渲染初始化失败（打包产物真实冒烟依赖）
+if (IS_SMOKE && app.commandLine && app.commandLine.appendSwitch) {
+  app.commandLine.appendSwitch('disable-gpu');
+}
+
 // ---- 布局常量（与 PRD 第四章视觉规格一致） ----
 const HANDLE_W = 34;            // 贴边把手宽
 const HANDLE_H = 152;           // 贴边把手高
@@ -58,7 +63,7 @@ const updater = new Updater({
   repo: pkg.repository && pkg.repository.repo,
   currentVersion: app.getVersion(),
   appDir,
-  exeBase: pkg.build.productName || 'SnapNote',
+  exeBase: (pkg.build && pkg.build.productName) || 'SnapNote',
   deps: { log: (...a) => console.log('[updater]', ...a) },
 });
 const UPDATER_ON = !IS_SMOKE && updater.enabled;

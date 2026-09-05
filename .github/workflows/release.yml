@@ -47,6 +47,12 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
+      - name: 打包产物真实冒烟（运行打包后的 exe 自检）
+        run: ./release/win-unpacked/SnapNote.exe --smoke-test
+        env:
+          SNAPNOTE_FAST: '1'
+        timeout-minutes: 3
+
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:

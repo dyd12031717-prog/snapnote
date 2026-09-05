@@ -77,7 +77,7 @@ Windows 登录后约 8 秒，屏幕**右上角**滑入今日任务摘要卡片
 ```bash
 npm install          # 安装依赖（首次含 Electron 二进制下载）
 npm start            # 启动应用
-npm test             # 34 项单元与主进程逻辑测试
+npm test             # 35 项单元与主进程逻辑测试
 npm run check        # 全源码语法检查
 npm run smoke        # 应用级冒烟自检（贴边/展开/收回/调度/Toast）
 python3 scripts/verify_ui.py   # 渲染层 UI 无头验证 + 截图

@@ -113,3 +113,31 @@ test('非冒烟模式：初始化、IPC、托盘、快捷键', async () => {
   // 托盘左键 = 切换
   assert.ok(st.windows.length >= 1);
 });
+
+test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
+  // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
+  // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。
+  // 此测试用"打包后字段形态"喂给 main.js，确保此类问题永不再现。
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-packaged-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const strippedPkg = {
+    name: 'snapnote', productName: '磁吸便签 SnapNote', version: '1.1.1',
+    description: '', author: '', license: 'MIT', main: 'electron/main.js',
+  };
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === '../package.json' && parent
+        && String(parent.filename).endsWith(path.join('electron', 'main.js'))) {
+      return strippedPkg;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const { electron } = loadMain(null, userData);
+    const st = electron.__state;
+    await new Promise(r => setImmediate(r));
+    assert.strictEqual(st.windows.length, 1, '打包态字段缺失时仍应正常启动建窗');
+  } finally {
+    Module._load = origLoad;
+  }
+});
