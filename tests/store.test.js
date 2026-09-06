@@ -97,3 +97,60 @@ test('写入产生 .bak 副本，主文件损坏时自动回退', () => {
   const s2 = new Store(s.baseDir);
   assert.ok(s2.tasks.length >= 1); // 从 .bak 回退
 });
+
+// ---------------- 每日任务（v1.2.0） ----------------
+
+function dayDiff(a, b) {
+  const sd = (x) => { const y = new Date(x); y.setHours(0, 0, 0, 0); return y.getTime(); };
+  return Math.round((sd(a) - sd(b)) / 86400000);
+}
+
+test('每日任务：add 带 repeat=daily，未来时刻原样保留', () => {
+  const s = tmpStore();
+  const future = new Date(Date.now() + 3600000);
+  const t = s.add('吃维生素', future.toISOString(), 'daily');
+  assert.strictEqual(t.repeat, 'daily');
+  assert.strictEqual(t.dueAt, future.toISOString());
+});
+
+test('每日任务：过去时刻在 add 时规范化到明天同时刻', () => {
+  const s = tmpStore();
+  const past = new Date(Date.now() - 60000);
+  const t = s.add('吃维生素', past.toISOString(), 'daily');
+  assert.strictEqual(t.repeat, 'daily');
+  const d = new Date(t.dueAt);
+  assert.ok(d.getTime() > Date.now(), '滚动后必须在未来');
+  assert.strictEqual(dayDiff(d, past), 1, '应为明天');
+  assert.strictEqual(d.getHours(), past.getHours(), '小时保留');
+  assert.strictEqual(d.getMinutes(), past.getMinutes(), '分钟保留');
+});
+
+test('每日任务：无到期时间或非法 repeat 一律退化为一次性', () => {
+  const s = tmpStore();
+  assert.strictEqual(s.add('无期', null, 'daily').repeat, null);
+  assert.strictEqual(
+    s.add('周任务', new Date(Date.now() + 86400000).toISOString(), 'weekly').repeat, null);
+  assert.strictEqual(s.add('普通', new Date(Date.now() + 3600000).toISOString()).repeat, null);
+});
+
+test('listToday：每日任务未完成始终计入（即使已滚到明天），完成当天排除', () => {
+  const now = new Date('2026-09-06T12:00:00');
+  const tasks = [
+    { title: '每日未完成已滚动', dueAt: '2026-09-07T09:00:00', done: false, repeat: 'daily' },
+    { title: '每日今天完成', dueAt: '2026-09-07T09:00:00', done: true, repeat: 'daily' },
+    { title: '普通明天', dueAt: '2026-09-07T09:00:00', done: false },
+  ];
+  const today = listToday(tasks, now);
+  assert.deepStrictEqual(today.map(t => t.title), ['每日未完成已滚动']);
+});
+
+test('每日任务 toggle：完成/恢复不破坏 repeat 与滚动后的 dueAt', () => {
+  const s = tmpStore();
+  const t = s.add('吃维生素', new Date(Date.now() + 3600000).toISOString(), 'daily');
+  s.toggle(t.id);
+  assert.strictEqual(s.tasks[0].done, true);
+  assert.strictEqual(s.tasks[0].repeat, 'daily');
+  s.toggle(t.id);
+  assert.strictEqual(s.tasks[0].done, false);
+  assert.strictEqual(s.tasks[0].notified, false);
+});

@@ -34,10 +34,25 @@ function isToday(iso, now) {
   return isSameDay(new Date(iso), now || new Date());
 }
 
-/** 今日任务 = 未完成且到期日在今天（含已过期），或到期时间在今天之后但创建即无期？——按 PRD：仅统计“今天到期未完成” */
+/** 下一个每日触发时刻：今天 hh:mm（已过则明天）。秒截零。 */
+function nextDailyAt(now, hh, mm) {
+  const d = new Date(now);
+  d.setHours(hh, mm, 0, 0);
+  if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1);
+  return d;
+}
+
+/**
+ * 今日任务 = 未完成且到期日在今天（含已过期），或未完成的每日任务。
+ * 每日任务的 dueAt 是"下一次触发时刻"，提醒后会滚到明天——
+ * 但只要今天还没打卡（done=false），它仍然算"今天的事"。
+ */
 function listToday(tasks, now) {
   const n = now || new Date();
-  return tasks.filter(t => !t.done && t.dueAt && isSameDay(new Date(t.dueAt), n));
+  return tasks.filter(t =>
+    !t.done && t.dueAt
+    && (t.repeat === 'daily' || isSameDay(new Date(t.dueAt), n))
+  );
 }
 
 function cmpTasks(a, b, now) {
@@ -105,18 +120,28 @@ class Store {
     this._writeJson(this.settingsFile, this.settings);
   }
 
-  /** 新增任务。title 为空返回 null；dueAt 为 ISO 字符串或 null */
-  add(title, dueAt) {
+  /** 新增任务。title 为空返回 null；dueAt 为 ISO 字符串或 null；repeat='daily' 为每日任务 */
+  add(title, dueAt, repeat) {
     const clean = String(title || '').trim();
     if (!clean) return null;
+    let d = null;
     if (dueAt) {
-      const d = new Date(dueAt);
-      if (isNaN(d.getTime())) dueAt = null;
+      const x = new Date(dueAt);
+      if (!isNaN(x.getTime())) d = x;
+    }
+    const isDaily = !!d && repeat === 'daily';
+    if (isDaily) {
+      // 过去的时刻（今天已错过）→ 规范化到明天同时刻；未来时刻原样保留
+      const now = new Date();
+      if (d.getTime() <= now.getTime()) {
+        d = nextDailyAt(now, d.getHours(), d.getMinutes());
+      }
     }
     const task = {
       id: newId(),
       title: clean.slice(0, 200),
-      dueAt: dueAt || null,
+      dueAt: d ? d.toISOString() : null,
+      repeat: isDaily ? 'daily' : null,
       done: false,
       createdAt: new Date().toISOString(),
       completedAt: null,
@@ -182,4 +207,4 @@ class Store {
   }
 }
 
-module.exports = { Store, DEFAULT_SETTINGS, listToday, isToday, cmpTasks };
+module.exports = { Store, DEFAULT_SETTINGS, listToday, isToday, cmpTasks, nextDailyAt };

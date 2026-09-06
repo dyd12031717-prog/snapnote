@@ -54,6 +54,7 @@ if (IS_SMOKE) {
 }
 const store = new Store(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'));
 const scheduler = new Scheduler(store, onTaskDue);
+scheduler.onChange = pushState; // 每日任务滚动/复活后同步 UI（pushState 为函数声明，提升可用）
 
 // ============================================================ 自动更新（便携版）
 const pkg = require('../package.json');
@@ -345,9 +346,13 @@ function firstRunNotice() {
 function onTaskDue(task) {
   if (IS_SMOKE) { smokeDue.push(task.title); return; }
   if (Notification.isSupported()) {
+    const isDaily = task.repeat === 'daily';
+    const when = isDaily
+      ? `每天 ${TimeFmt.fmtHM(new Date(task.dueAt))}`
+      : TimeFmt.formatDue(task.dueAt);
     const n = new Notification({
-      title: '到点提醒 · 磁吸便签',
-      body: `${task.title}（${TimeFmt.formatDue(task.dueAt)}）`,
+      title: isDaily ? '每日提醒 · 磁吸便签' : '到点提醒 · 磁吸便签',
+      body: `${task.title}（${when}）`,
     });
     n.on('click', expand);
     n.show();
@@ -358,8 +363,8 @@ function onTaskDue(task) {
 // ============================================================ IPC
 function setupIpc() {
   ipcMain.handle('ui:ready', () => payload());
-  ipcMain.handle('tasks:add', (_e, { title, dueAt }) => {
-    const t = store.add(title, dueAt);
+  ipcMain.handle('tasks:add', (_e, { title, dueAt, repeat }) => {
+    const t = store.add(title, dueAt, repeat);
     pushState();
     return t;
   });
@@ -443,6 +448,18 @@ async function runSmoke() {
 
   scheduler.tick(Date.now() + 6000);
   ok(smokeDue.length === 1 && smokeDue[0] === '冒烟任务A', '到点调度触发且不重复');
+
+  // 每日任务：到点提醒一次 + 滚动到明天 + 不重复
+  store.add('冒烟每日C', new Date(Date.now() + 3000).toISOString(), 'daily');
+  scheduler.tick(Date.now() + 6000);
+  ok(smokeDue.length === 2 && smokeDue[1] === '冒烟每日C', '每日任务到点触发');
+  const dailyC = store.tasks.find(t => t.title === '冒烟每日C');
+  ok(dailyC && dailyC.repeat === 'daily', '每日任务 repeat 落盘');
+  const sd = (x) => { const y = new Date(x); y.setHours(0, 0, 0, 0); return y.getTime(); };
+  const dayGap = Math.round((sd(dailyC.dueAt) - sd(Date.now())) / 86400000);
+  ok(dayGap >= 1, `每日任务滚动到明天（差 ${dayGap} 天）`);
+  scheduler.tick(Date.now() + 6500);
+  ok(smokeDue.length === 2, '每日任务提醒后不重复');
 
   showToast({ title: '早上好，今天有 2 个任务', body: '最早 09:30 部门周会' });
   await wait(900);

@@ -22,10 +22,12 @@
   const customRow = $('#customRow');
   const customTime = $('#customTime');
   const customClear = $('#customClear');
+  const repeatToggle = $('#repeatToggle');
 
   let state = { tasks: [], settings: {}, mode: 'handle', hotkeyActive: true };
   let chipAt = null;          // 当前选中胶囊的 ISO 时间
   let chipsCache = [];
+  let repeatDaily = false;    // 「每天」开关：所选时间成为每日提醒时刻
 
   // ---------------- 时间工具（与 electron/lib/timeparse.js 同规则） ----------------
   const pad2 = (n) => String(n).padStart(2, '0');
@@ -33,8 +35,10 @@
   const startOfDay = (d) => { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; };
   const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 
-  function isOverdue(t) { return !!t.dueAt && !t.done && new Date(t.dueAt).getTime() <= Date.now(); }
+  function isOverdue(t) { return !!t.dueAt && !t.repeat && !t.done && new Date(t.dueAt).getTime() <= Date.now(); }
   function isTodayTask(t) { return !!t.dueAt && !t.done && sameDay(new Date(t.dueAt), new Date()); }
+  /** 每日任务：未打卡就算“今天的事”（dueAt 是下一次触发时刻，提醒后会滚到明天） */
+  function isPendingToday(t) { return t.repeat === 'daily' && !t.done && !!t.dueAt; }
 
   function buildChips() {
     const n = new Date();
@@ -43,11 +47,14 @@
     if (tonight.getTime() <= n.getTime()) { tonight.setHours(21, 0, 0, 0); tonightLabel = '今晚 21:00'; }
     const tomorrow = startOfDay(n); tomorrow.setDate(tomorrow.getDate() + 1); tomorrow.setHours(9, 0, 0, 0);
     const after = startOfDay(n); after.setDate(after.getDate() + 2); after.setHours(9, 0, 0, 0);
+    const mk = (label, at) => (repeatDaily && at !== 'custom')
+      ? { label: '每天 ' + fmtHM(new Date(at)), at }
+      : { label, at };
     return [
-      { label: '1 小时后', at: new Date(n.getTime() + 3600000).toISOString() },
-      { label: tonightLabel, at: tonight.toISOString() },
-      { label: '明天 09:00', at: tomorrow.toISOString() },
-      { label: '后天 09:00', at: after.toISOString() },
+      mk('1 小时后', new Date(n.getTime() + 3600000).toISOString()),
+      mk(tonightLabel, tonight.toISOString()),
+      mk('明天 09:00', tomorrow.toISOString()),
+      mk('后天 09:00', after.toISOString()),
       { label: '自定义…', at: 'custom' },
     ];
   }
@@ -72,7 +79,8 @@
   }
 
   function renderHandle() {
-    const count = state.tasks.filter(t => !t.done && (isTodayTask(t) || isOverdue(t))).length;
+    const count = state.tasks.filter(t =>
+      !t.done && (isPendingToday(t) || isTodayTask(t) || isOverdue(t))).length;
     handleBadge.textContent = count;
     handleBadge.dataset.zero = count === 0 ? '1' : '0';
     handleDot.classList.toggle('quiet', count === 0);
@@ -134,7 +142,15 @@
 
     const meta = document.createElement('div');
     meta.className = 'tmeta';
-    if (t.dueAt) {
+    if (t.repeat === 'daily' && t.dueAt) {
+      // 每日任务：绿色胶囊，永不显示“已过期”
+      const pill = document.createElement('span');
+      pill.className = 'duepill daily';
+      pill.textContent = '↻ 每天 ' + fmtHM(new Date(t.dueAt))
+        + (t.done ? ' · 今天已完成' : '');
+      pill.title = '每天同一时间提醒';
+      meta.appendChild(pill);
+    } else if (t.dueAt) {
       const pill = document.createElement('span');
       pill.className = 'duepill' + (isOverdue(t) ? ' overdue' : (isTodayTask(t) ? '' : ' later'));
       pill.textContent = fmtDue(t.dueAt) + (isOverdue(t) ? ' · 已过期' : '');
@@ -195,7 +211,7 @@
   }
 
   // ---------------- 录入 ----------------
-  async function submitTask() {
+  function submitTask() {
     const title = taskInput.value.trim();
     if (!title) return;
     let dueAt = chipAt;
@@ -203,11 +219,14 @@
       const d = new Date(customTime.value);
       if (!isNaN(d.getTime())) dueAt = d.toISOString();
     }
-    await api.addTask(title, dueAt || null);
+    // 「每天」开启且选了时间 → 每日任务；没选时间则退化为一次性（store 层同样兜底）
+    api.addTask(title, dueAt || null, dueAt && repeatDaily ? 'daily' : null);
     taskInput.value = '';
     taskInput.focus();
     customRow.hidden = true;
     customTime.value = '';
+    repeatDaily = false;
+    repeatToggle.classList.remove('on');
     renderChips();
   }
 
@@ -217,6 +236,19 @@
   });
   customClear.addEventListener('click', () => {
     customRow.hidden = true; customTime.value = ''; markActive(null);
+  });
+
+  // 「每天」开关：切换后胶囊文案在「明天 09:00」/「每天 09:00」间变形，保留已选时间
+  repeatToggle.addEventListener('click', () => {
+    repeatDaily = !repeatDaily;
+    repeatToggle.classList.toggle('on', repeatDaily);
+    const keep = chipAt;
+    renderChips();
+    chipAt = keep;
+    if (keep) {
+      const c = chipsCache.find(x => x.at === keep);
+      if (c) markActive(c.label);
+    }
   });
   $('#btnDock').addEventListener('click', () => api.dock());
   $('#btnSettings').addEventListener('click', () => api.openSettings());

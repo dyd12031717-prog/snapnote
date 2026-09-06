@@ -114,6 +114,28 @@ test('非冒烟模式：初始化、IPC、托盘、快捷键', async () => {
   assert.ok(st.windows.length >= 1);
 });
 
+test('每日任务 IPC：tasks:add 携带 repeat 透传存储并落盘', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-daily-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron } = loadMain(null, userData);
+  await new Promise(r => setImmediate(r));
+
+  const t = await electron.ipcMain._invoke('tasks:add', {
+    title: '每日IPC任务',
+    dueAt: new Date(Date.now() + 3600000).toISOString(),
+    repeat: 'daily',
+  });
+  assert.strictEqual(t.repeat, 'daily', 'IPC 返回应带 repeat');
+  assert.strictEqual(t.done, false);
+  const disk = JSON.parse(fs.readFileSync(path.join(userData, 'tasks.json'), 'utf8'));
+  assert.strictEqual(disk.tasks[0].repeat, 'daily', 'repeat 应落盘');
+  assert.strictEqual(disk.tasks[0].title, '每日IPC任务');
+
+  // 不带 repeat 的旧调用方式（老渲染层兼容）：退化为一次性
+  const t2 = await electron.ipcMain._invoke('tasks:add', { title: '普通任务', dueAt: null });
+  assert.strictEqual(t2.repeat, null, '无 repeat 退化为一次性');
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。

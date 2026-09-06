@@ -1,7 +1,7 @@
 {
   "name": "snapnote",
   "productName": "磁吸便签 SnapNote",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "description": "贴在屏幕右缘的轻量任务便签：开机提醒今日任务，快捷键随叫随到，用完自动磁吸回边缘",
   "author": "SnapNote 项目组",
   "license": "MIT",

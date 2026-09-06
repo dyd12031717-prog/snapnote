@@ -38,8 +38,11 @@
       <div class="note-input">
         <input id="taskInput" type="text" maxlength="200" placeholder="要做什么？回车记下…"
                autocomplete="off" spellcheck="false">
-        <div class="chips" id="chips">
-          <!-- 快捷时间胶囊由 app.js 生成 -->
+        <div class="chip-row">
+          <button id="repeatToggle" class="chip chip-repeat" title="开启后，所选时间将成为每天的提醒时刻">每天</button>
+          <div class="chips" id="chips">
+            <!-- 快捷时间胶囊由 app.js 生成 -->
+          </div>
         </div>
         <div class="custom-row" id="customRow" hidden>
           <input type="datetime-local" id="customTime">

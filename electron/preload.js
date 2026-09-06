@@ -21,7 +21,7 @@ contextBridge.exposeInMainWorld('snapnote', {
   idle: () => ipcRenderer.send('magnet:idle'),
 
   // 任务
-  addTask: (title, dueAt) => ipcRenderer.invoke('tasks:add', { title, dueAt }),
+  addTask: (title, dueAt, repeat) => ipcRenderer.invoke('tasks:add', { title, dueAt, repeat }),
   toggleTask: (id) => ipcRenderer.invoke('tasks:toggle', id),
   removeTask: (id) => ipcRenderer.invoke('tasks:remove', id),
 

@@ -102,6 +102,7 @@ body.mode-note #note { display: flex; }
 }
 .duepill.overdue { background: #FDE3E0; color: #C0392B; }
 .duepill.later { background: #E7F0FA; color: #2C5FA8; }
+.duepill.daily { background: #DDF0E2; color: #1E7B34; }
 .tdel { margin-left: auto; border: none; background: transparent; cursor: pointer;
   color: #C9A96A; font-size: 12px; padding: 1px 4px; border-radius: 5px; }
 .tdel:hover { background: #FBE0D6; color: #C0392B; }
@@ -120,7 +121,8 @@ body.mode-note #note { display: flex; }
   box-shadow: 0 0 0 3px rgba(243,156,18,.16); }
 #taskInput::placeholder { color: #C7A662; }
 
-.chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; align-items: center; }
 .chip {
   border: 1px solid rgba(243,156,18,.55); background: #FFF3D6;
   color: #9A6A10; font-size: 11px; font-weight: 600;
@@ -129,6 +131,9 @@ body.mode-note #note { display: flex; }
 .chip:hover { background: #FFE9B8; }
 .chip.active { background: #F39C12; color: #FFF; border-color: #D9860A; }
 .chip-plain { border-style: dashed; background: transparent; }
+.chip-repeat { border-color: #34A853; background: #EDF7EF; color: #1E7B34; }
+.chip-repeat:hover { background: #DDF0E2; }
+.chip-repeat.on { background: #34A853; color: #FFF; border-color: #2B8A47; }
 
 .custom-row { display: flex; gap: 6px; margin-top: 7px; align-items: center; }
 #customTime {
