@@ -37,12 +37,13 @@ MOCK_STATE = {
     "settings": {"hotkey": "Ctrl+Alt+N", "autostart": True, "sound": False,
                  "collapseDelay": 30, "startupToast": True},
     "mode": "handle", "hotkeyActive": True,
+    "update": {"enabled": True, "state": "idle", "currentVersion": "1.2.1", "version": None, "progressPct": 0},
 }
 
 MOCK = """
 window.__SNAPNOTE_MOCK__ = {
   _state: %s,
-  _pushCbs: [], _modeCbs: [], _toastCbs: [], _dueCbs: [], _added: [],
+  _pushCbs: [], _modeCbs: [], _toastCbs: [], _dueCbs: [], _added: [], _updateCalls: [],
   ready: async function(){ return JSON.parse(JSON.stringify(this._state)); },
   onPush: function(cb){ this._pushCbs.push(cb); },
   onViewMode: function(cb){ this._modeCbs.push(cb); },
@@ -51,21 +52,35 @@ window.__SNAPNOTE_MOCK__ = {
   expand: function(){ this._modeCbs.forEach(function(c){c('note');}); },
   dock: function(){ this._modeCbs.forEach(function(c){c('handle');}); },
   keepalive: function(){}, idle: function(){},
+  _push: function(){ var s = Object.assign({}, this._state);
+    this._pushCbs.forEach(function(cb){ cb(s); }); },
+  checkUpdate: async function(){
+    this._updateCalls.push('check');
+    this._state.update = {enabled:true, state:'has-update', currentVersion:'1.2.1', version:'1.3.0', progressPct:0};
+    this._push();
+    return this._state.update;
+  },
+  downloadUpdate: async function(){
+    this._updateCalls.push('download');
+    this._state.update = {enabled:true, state:'downloading', currentVersion:'1.2.1', version:'1.3.0', progressPct:40};
+    this._push();
+    return this._state.update;
+  },
+  restartUpdate: async function(){ this._updateCalls.push('restart'); return this._state.update; },
   addTask: async function(title, dueAt, repeat){
     this._added.push({title: title, dueAt: dueAt, repeat: repeat || null});
     this._state.tasks.unshift({id:'t'+Date.now(), title:title, dueAt:dueAt||null,
       repeat: repeat || null, done:false, notified:false});
-    var s = Object.assign({}, this._state);
-    this._pushCbs.forEach(function(cb){ cb(s); });
+    this._push();
     return this._state.tasks[0];
   },
   toggleTask: async function(id){ var t=this._state.tasks.find(function(x){return x.id===id;});
-    if(t){t.done=!t.done; var s=Object.assign({},this._state); this._pushCbs.forEach(function(cb){cb(s);});} },
+    if(t){t.done=!t.done; this._push();} },
   removeTask: async function(id){ this._state.tasks = this._state.tasks.filter(function(x){return x.id!==id;});
-    var s=Object.assign({},this._state); this._pushCbs.forEach(function(cb){cb(s);}); },
+    this._push(); },
   getSettings: async function(){ return JSON.parse(JSON.stringify(this._state.settings)); },
   setSettings: async function(p){ Object.assign(this._state.settings, p);
-    var s=Object.assign({},this._state); this._pushCbs.forEach(function(cb){cb(s);}); return this._state.settings; },
+    this._push(); return this._state.settings; },
   openSettings: function(){}, quitApp: function(){}, toastClick: function(){},
 };
 """ % json.dumps(MOCK_STATE, ensure_ascii=False)
@@ -134,6 +149,20 @@ def main():
         assert page.locator(".task.done .ttitle", has_text="给客户回电话").count() == 1, "完成后应划线"
         page.screenshot(path=str(OUT / "ui_note_added.png"))
 
+        # 5.5) 更新按钮：idle 隐藏 → 检查后出现 → 点击下载（v1.3.0）
+        assert page.locator("#btnUpdate").is_hidden(), "idle 态更新按钮应隐藏"
+        page.evaluate("window.__SNAPNOTE_MOCK__.checkUpdate()")
+        page.wait_for_timeout(200)
+        upd_btn = page.locator("#btnUpdate")
+        assert upd_btn.is_visible(), "发现新版本后按钮应出现"
+        assert "新版本" in upd_btn.inner_text(), f"按钮文案应含新版本，实际 {upd_btn.inner_text()}"
+        upd_btn.click()
+        page.wait_for_timeout(200)
+        calls = page.evaluate("window.__SNAPNOTE_MOCK__._updateCalls")
+        assert calls and calls[-1] == 'download', f"点击新版本按钮应触发下载，实际 {calls}"
+        assert "40%" in upd_btn.inner_text(), f"下载中应显示进度，实际 {upd_btn.inner_text()}"
+        page.screenshot(path=str(OUT / "ui_note_update.png"))
+
         # 6) Toast 视图
         tpage = browser.new_page(viewport={"width": 380, "height": 132})
         tpage.add_init_script(MOCK)
@@ -153,6 +182,15 @@ def main():
         spage.goto((ROOT / "settings.html").as_uri())
         spage.wait_for_timeout(300)
         assert spage.input_value("#delayInput") == "30", "收起延时默认应为30秒"
+        # 软件更新区（v1.3.0）：模拟主进程 did-finish-load 推送初始状态
+        spage.evaluate("window.__SNAPNOTE_MOCK__._push()")
+        spage.wait_for_timeout(200)
+        assert "检查更新" in spage.inner_text("#btnCheckUpdate"), "更新区应有检查按钮"
+        assert "1.2.1" in spage.inner_text("#updateHint"), f"应显示当前版本，实际 {spage.inner_text('#updateHint')}"
+        spage.click("#btnCheckUpdate")
+        spage.wait_for_timeout(300)
+        assert "立即下载" in spage.inner_text("#btnCheckUpdate"), "检查到新版本后按钮应变立即下载"
+        assert "1.3.0" in spage.inner_text("#updateHint"), f"提示应含新版本号，实际 {spage.inner_text('#updateHint')}"
         spage.screenshot(path=str(OUT / "ui_settings.png"))
 
         browser.close()

@@ -23,6 +23,7 @@
   const customTime = $('#customTime');
   const customClear = $('#customClear');
   const repeatToggle = $('#repeatToggle');
+  const btnUpdate = $('#btnUpdate');
 
   let state = { tasks: [], settings: {}, mode: 'handle', hotkeyActive: true };
   let chipAt = null;          // 当前选中胶囊的 ISO 时间
@@ -203,7 +204,28 @@
       el.classList.toggle('active', el.dataset.label === label));
   }
 
-  function render() { renderHandle(); renderNote(); }
+  function render() { renderHandle(); renderNote(); renderUpdateBtn(state.update); }
+
+  /** v1.3.0：更新入口按钮——仅存在新版本/下载中/就绪/失败时出现，平时零打扰 */
+  function renderUpdateBtn(u) {
+    if (!u || !u.enabled || u.state === 'idle' || u.state === 'disabled') {
+      btnUpdate.hidden = true;
+      return;
+    }
+    btnUpdate.hidden = false;
+    switch (u.state) {
+      case 'has-update': btnUpdate.textContent = '↻ 新版本'; break;
+      case 'downloading': btnUpdate.textContent = '↻ ' + (u.progressPct || 0) + '%'; break;
+      case 'ready': btnUpdate.textContent = '↻ 重启更新'; break;
+      default: btnUpdate.textContent = '↻ 重试'; break; // error
+    }
+  }
+  btnUpdate.addEventListener('click', () => {
+    const u = state.update || {};
+    if (u.state === 'has-update') { api.downloadUpdate(); return; }
+    if (u.state === 'ready') { api.restartUpdate(); return; }
+    api.checkUpdate();
+  });
 
   function push(data) {
     state = data;

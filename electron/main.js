@@ -83,7 +83,22 @@ function updaterMenuTemplate() {
   return [{ label: labelFor(), click: onUpdaterMenu }];
 }
 
-function refreshTray() { if (tray && tray._rebuild) tray._rebuild(); }
+function refreshTray() {
+  if (tray && tray._rebuild) tray._rebuild();
+  pushState(); // v1.3.0：更新状态变化同步到设置页/便签头部
+}
+
+/** v1.3.0：更新状态摘要（渲染层展示用） */
+function updatePayload() {
+  if (!UPDATER_ON) return { enabled: false, state: 'disabled', currentVersion: app.getVersion() };
+  return {
+    enabled: true,
+    state: updater.state || 'idle',
+    currentVersion: updater.currentVersion || app.getVersion(),
+    version: (updater.lastCheck && updater.lastCheck.version) || null,
+    progressPct: updater.progressPct || 0,
+  };
+}
 
 function notifyUpdate(title, body, clickFn) {
   if (!Notification.isSupported()) return;
@@ -207,6 +222,7 @@ function payload() {
     settings: { ...store.settings },
     mode,
     hotkeyActive: currentHotkeyOk,
+    update: updatePayload(), // v1.3.0：手动检查更新入口
   };
 }
 function pushState() {
@@ -351,6 +367,13 @@ function createSettingsWindow() {
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
   });
   settingsWin.loadFile(path.join(ROOT, 'renderer', 'settings.html'));
+  // v1.3.0：打开即推送完整状态（设置页「软件更新」区需要初始版本/更新状态）
+  const pushToSettings = () => {
+    try { settingsWin.webContents.send('state:push', payload()); } catch (e) { /* ignore */ }
+  };
+  if (settingsWin.webContents.isLoading()) {
+    settingsWin.webContents.once('did-finish-load', pushToSettings);
+  } else pushToSettings();
   settingsWin.on('closed', () => { settingsWin = null; });
 }
 
@@ -424,6 +447,14 @@ function setupIpc() {
     pushState();
     return s;
   });
+
+  // v1.3.0 手动检查更新（设置页「软件更新」区 / 便签头部按钮）
+  ipcMain.handle('update:check', async () => {
+    await checkForUpdate(true);
+    return updatePayload();
+  });
+  ipcMain.handle('update:download', () => { startDownload(); return updatePayload(); });
+  ipcMain.handle('update:restart', () => { restartToUpdate(); return updatePayload(); });
   ipcMain.on('magnet:expand', expand);
   ipcMain.on('magnet:dock', dock);
   ipcMain.on('magnet:keepalive', () => { if (mode === 'expanded') clearTimeout(collapseTimer); });

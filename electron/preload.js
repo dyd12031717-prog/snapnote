@@ -31,6 +31,11 @@ contextBridge.exposeInMainWorld('snapnote', {
   openSettings: () => ipcRenderer.send('settings:open'),
   quitApp: () => ipcRenderer.send('app:quit'),
 
+  // 更新（v1.3.0 手动检查）
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  restartUpdate: () => ipcRenderer.invoke('update:restart'),
+
   // Toast
   toastClick: () => ipcRenderer.send('toast:click'),
 });

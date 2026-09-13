@@ -45,6 +45,11 @@
   .status { flex: 1; font-size: 11px; color: #8FA35C; text-align: right; }
   .status.err { color: #C0392B; }
   .ver { padding: 0 18px 10px; font-size: 10.5px; color: #B9985E; }
+  .btn-upd { padding: 6px 14px; font-size: 12px; }
+  .btn-upd.busy { opacity: .6; cursor: wait; }
+  .btn-upd.ready { background: #34A853; color: #FFF; border-color: #2B8A47; }
+  .btn-upd.ready:hover { background: #2B8A47; }
+  #updateHint { transition: color .2s; }
 </style>
 </head>
 <body>
@@ -75,6 +80,11 @@
       <div class="col"><div class="label">自动收起延时</div>
         <div class="hint">便签失焦后多少秒磁回屏幕边缘（5–600）</div></div>
       <div class="ctrl"><input id="delayInput" type="number" min="5" max="600" value="30"></div>
+    </div>
+    <div class="row">
+      <div class="col"><div class="label">软件更新</div>
+        <div class="hint" id="updateHint">检查 GitHub 上的最新版本</div></div>
+      <div class="ctrl"><button class="btn btn-plain btn-upd" id="btnCheckUpdate">检查更新</button></div>
     </div>
   </div>
   <div class="foot">
@@ -145,6 +155,76 @@
     });
 
     if (api && api.getSettings) api.getSettings().then(fill).catch(() => {});
+
+    // ---------------- 软件更新（v1.3.0 手动检查） ----------------
+    const updBtn = $('btnCheckUpdate');
+    const updHint = $('updateHint');
+    let upd = { enabled: false, state: 'disabled', currentVersion: '', version: null, progressPct: 0 };
+
+    function renderUpdate(u) {
+      if (!u) return;
+      upd = u;
+      updBtn.classList.remove('busy', 'ready');
+      updBtn.disabled = false;
+      if (!u.enabled) {
+        updHint.textContent = '当前版本 v' + (u.currentVersion || '?') + '（开发模式不检查更新）';
+        updBtn.hidden = true;
+        return;
+      }
+      updBtn.hidden = false;
+      const base = '当前版本 v' + (u.currentVersion || '?');
+      switch (u.state) {
+        case 'idle':
+          updHint.textContent = base + ' · 检查 GitHub 上的最新版本';
+          updBtn.textContent = '检查更新';
+          break;
+        case 'has-update':
+          updHint.textContent = base + ' → 发现新版本 v' + u.version;
+          updBtn.textContent = '立即下载';
+          updBtn.classList.add('ready');
+          break;
+        case 'downloading':
+          updHint.textContent = '正在下载 v' + u.version + ' … ' + (u.progressPct || 0) + '%';
+          updBtn.textContent = '下载中…';
+          updBtn.disabled = true;
+          updBtn.classList.add('busy');
+          break;
+        case 'ready':
+          updHint.textContent = 'v' + u.version + ' 已就绪，重启后生效';
+          updBtn.textContent = '重启并更新';
+          updBtn.classList.add('ready');
+          break;
+        case 'error':
+        default:
+          updHint.textContent = base + ' · 检查失败（网络异常），可重试';
+          updBtn.textContent = '重试';
+          break;
+      }
+    }
+
+    updBtn.addEventListener('click', async () => {
+      if (!api) return;
+      try {
+        if (upd.state === 'ready') { if (api.restartUpdate) await api.restartUpdate(); return; }
+        if (upd.state === 'has-update') {
+          if (api.downloadUpdate) renderUpdate(await api.downloadUpdate());
+          return;
+        }
+        if (!api.checkUpdate) return;
+        updBtn.textContent = '检查中…';
+        updBtn.disabled = true;
+        updBtn.classList.add('busy');
+        renderUpdate(await api.checkUpdate());
+      } catch (e) {
+        renderUpdate({ enabled: true, state: 'error', currentVersion: upd.currentVersion });
+      }
+    });
+
+    if (api && api.onPush) {
+      api.onPush((data) => { if (data && data.update) renderUpdate(data.update); });
+    }
+    renderUpdate((typeof window !== 'undefined' && window.__INITIAL_UPDATE__)
+      || { enabled: false, state: 'disabled', currentVersion: '' });
   })();
 </script>
 </body>

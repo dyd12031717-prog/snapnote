@@ -173,6 +173,69 @@ test('每日任务 IPC：tasks:add 携带 repeat 透传存储并落盘', async (
   assert.strictEqual(t2.repeat, null, '无 repeat 退化为一次性');
 });
 
+test('手动检查更新 IPC（v1.3.0）：check/download/restart + 状态推送', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-upd-'));
+  process.env.SNAPNOTE_FAST = '1';
+
+  // 用桩替换 ./lib/updater（仅 main.js 的 require 生效），驱动完整状态机
+  const calls = { check: 0, download: 0, apply: 0 };
+  class StubUpdater {
+    constructor() {
+      this.enabled = true; this.currentVersion = '1.2.1';
+      this.state = 'idle'; this.progressPct = 0; this.lastCheck = null;
+    }
+    async check() { calls.check++; this.lastCheck = { hasUpdate: true, version: '1.3.0' }; return this.lastCheck; }
+    async download(onProgress) { calls.download++; onProgress(50, 100); return '/tmp/x.zip'; }
+    applyAndRestart() { calls.apply++; return true; }
+    cleanupStale() {}
+  }
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === './lib/updater' && parent
+        && String(parent.filename).endsWith(path.join('electron', 'main.js'))) {
+      return { Updater: StubUpdater };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    const { electron } = loadMain(null, userData);
+    const st = electron.__state;
+    await new Promise(r => setImmediate(r));
+
+    // 1) ui:ready 载荷带 update 字段（enabled + 当前版本）
+    const ready = await electron.ipcMain._invoke('ui:ready');
+    assert.strictEqual(ready.update.enabled, true, 'ui:ready 应带 update.enabled');
+    assert.strictEqual(ready.update.state, 'idle', '初始 idle');
+    assert.strictEqual(ready.update.currentVersion, '1.2.1');
+
+    // 2) 手动检查：发现新版本 → has-update + 推送 UI
+    st.sent.length = 0;
+    const r1 = await electron.ipcMain._invoke('update:check');
+    assert.strictEqual(calls.check, 1, '应调用 updater.check');
+    assert.strictEqual(r1.state, 'has-update');
+    assert.strictEqual(r1.version, '1.3.0', '新版本号透传');
+    const push2 = st.sent.filter(s => s.channel === 'state:push');
+    assert.ok(push2.length >= 1, '更新状态变化应推送 UI');
+    assert.strictEqual(push2[push2.length - 1].data.update.state, 'has-update', '推送应含最新状态');
+
+    // 3) 下载：downloading → ready，进度回调推进
+    st.sent.length = 0;
+    const r2 = await electron.ipcMain._invoke('update:download');
+    assert.strictEqual(calls.download, 1, '应调用 updater.download');
+    assert.strictEqual(r2.state, 'downloading', 'IPC 即时返回 downloading');
+    await new Promise(r => setImmediate(r));   // 后台下载完成 → ready
+    assert.ok(true);
+
+    // 4) 就绪后 restart：触发 applyAndRestart（mock app.quit 无害）
+    const r4 = await electron.ipcMain._invoke('update:restart');
+    assert.strictEqual(calls.apply, 1, 'ready 时应触发重启更新');
+    assert.ok(r4, 'restart 应返回状态对象');
+  } finally {
+    Module._load = origLoad;
+  }
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。
