@@ -114,6 +114,43 @@ test('非冒烟模式：初始化、IPC、托盘、快捷键', async () => {
   assert.ok(st.windows.length >= 1);
 });
 
+test('收起防挡（v1.2.1）：重现化 + 监护自愈 + 窗口参数防御', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-dock-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron } = loadMain(null, userData);
+  const st = electron.__state;
+  await new Promise(r => setImmediate(r));
+  const win = st.windows[0];
+
+  // 1) 窗口参数：frameless + resizable:true（规避 Windows 透明窗 bounds 锁死），
+  //    显式禁最大化/最小化（无系统手势把窗口搞大的口子）
+  assert.strictEqual(win.opts.resizable, true, 'resizable 应为 true');
+  assert.strictEqual(win.opts.maximizable, false, '应禁最大化');
+  assert.strictEqual(win.opts.minimizable, false, '应禁最小化');
+
+  // 2) 展开 → 失焦自动收起：动画完成后应“重现化”强制 DWM 命中区跟随窗口
+  st.hotkeys.get('Ctrl+Alt+N')();
+  await new Promise(r => setTimeout(r, 300));
+  assert.strictEqual(win.getBounds().width, 340, '展开宽度 340');
+
+  win.emitWin('blur'); // 失焦 → FAST 下 400ms 后 dock
+  await new Promise(r => setTimeout(r, 1200)); // 400 收起延时 + 230 动画 + 缓冲
+  assert.strictEqual(win.getBounds().width, 34, '收起后宽度 34');
+  const i = win.calls.lastIndexOf('hide');
+  assert.ok(i >= 0, '收起后应执行 hide（重现化），calls=' + JSON.stringify(win.calls));
+  assert.strictEqual(win.calls[i + 1], 'showInactive', 'hide 后应 showInactive 恢复');
+  assert.ok(win.isVisible(), '重现化后窗口应可见');
+
+  // 3) 监护自愈：模拟 Windows 异常路径把窗口“改大”（视觉把手 + 物理 340 宽）
+  win.setBounds({ x: 1600 - 340, y: 100, width: 340, height: 560 });
+  await new Promise(r => setTimeout(r, 2600)); // 等监护 tick（2s）
+  const b = win.getBounds();
+  assert.strictEqual(b.width, 34, '监护应把 docked 态窗口收敛回 34 宽');
+  assert.strictEqual(b.x, 1600 - 34, '收敛位置应贴右缘');
+  const hides = win.calls.filter(c => c === 'hide').length;
+  assert.ok(hides >= 2, '自愈时也应执行重现化（hide 次数 ' + hides + '）');
+});
+
 test('每日任务 IPC：tasks:add 携带 repeat 透传存储并落盘', async () => {
   const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-daily-'));
   process.env.SNAPNOTE_FAST = '1';

@@ -28,15 +28,21 @@ class BrowserWindow {
     this.opts = opts;
     this._bounds = { x: opts.x || 0, y: opts.y || 0, width: opts.width || 0, height: opts.height || 0 };
     this._destroyed = false;
+    this._hidden = false;
+    this.calls = [];   // hide/showInactive/focus 等调用序列（重现化断言用）
     this.webContents = new WebContents(this);
     this._handlers = new EventEmitter();
     state.windows.push(this);
   }
   loadFile(p) { this.loadedFile = p; return Promise.resolve(); }
-  setBounds(b) { Object.assign(this._bounds, b); }
+  setBounds(b) { Object.assign(this._bounds, b); this.calls.push('setBounds'); }
   getBounds() { return { ...this._bounds }; }
   setAlwaysOnTop() {}
-  focus() { this.focused = true; }
+  focus() { this.focused = true; this.calls.push('focus'); }
+  hide() { this._hidden = true; this.calls.push('hide'); }
+  showInactive() { this._hidden = false; this.calls.push('showInactive'); }
+  show() { this._hidden = false; this.calls.push('show'); }
+  isVisible() { return !this._hidden; }
   isDestroyed() { return this._destroyed; }
   destroy() { this._destroyed = true; this._handlers.emit('closed'); }
   close() { this.destroy(); }

@@ -221,7 +221,12 @@ function createNoteWindow() {
     ...dockedBounds(),
     frame: false,
     transparent: true,
-    resizable: false,
+    // v1.2.1 防挡修复：Windows 上 transparent+frameless 若 resizable:false，
+    // setBounds 缩小后 DWM 鼠标命中区可能不跟随（视觉收起、物理仍 340 宽挡点击）。
+    // frameless 无边框可拖，resizable:true 无用户可见副作用，但让 API 缩放始终生效。
+    resizable: true,
+    maximizable: false,
+    minimizable: false,
     movable: true,
     skipTaskbar: true,
     alwaysOnTop: true,
@@ -255,8 +260,48 @@ function dock() {
   mode = 'docked';
   clearTimeout(collapseTimer); collapseTimer = null;
   noteWin.webContents.send('view:mode', 'handle');
-  animateBounds(noteWin, dockedBounds());
+  animateBounds(noteWin, dockedBounds(), reassertDocked);
   pushState();
+}
+
+/**
+ * v1.2.1 防挡修复：收起态硬收敛 + 窗口“重现化”。
+ * Windows 透明无边框窗口缩小后，系统层鼠标命中区可能滞后不更新（看起来收起了，
+ * 但展开大小的区域仍拦截底层点击）。hide → showInactive 强制 DWM 重建窗口表面，
+ * 命中区随之与物理尺寸对齐。showInactive 不抢焦点。
+ */
+function reassertDocked() {
+  if (!noteWin || noteWin.isDestroyed()) return;
+  try {
+    noteWin.setBounds(dockedBounds());
+    if (noteWin.isVisible()) {
+      noteWin.hide();
+      noteWin.showInactive();
+    }
+  } catch (e) { /* 窗口竞态销毁时静默 */ }
+}
+
+/** v1.2.1 窗口监护：每 2 秒校验 bounds 与 mode 一致，漂移即自愈（DPI 变更/系统干扰等） */
+function startWindowGuard() {
+  const guard = setInterval(() => {
+    if (!noteWin || noteWin.isDestroyed()) return;
+    try {
+      const b = noteWin.getBounds();
+      if (mode === 'docked') {
+        const t = dockedBounds();
+        if (Math.abs(b.width - HANDLE_W) > 2 || Math.abs(b.height - HANDLE_H) > 2
+          || Math.abs(b.x - t.x) > 4 || Math.abs(b.y - t.y) > 4) {
+          reassertDocked();
+        }
+      } else if (mode === 'expanded') {
+        const t = expandedBounds();
+        if (Math.abs(b.width - NOTE_W) > 2 || Math.abs(b.height - t.height) > 4) {
+          noteWin.setBounds(t); // 展开态只收敛不重现化，避免使用中闪动
+        }
+      }
+    } catch (e) { /* ignore */ }
+  }, 2000);
+  if (guard.unref) guard.unref();
 }
 
 function toggleMagnet() { mode === 'expanded' ? dock() : expand(); }
@@ -446,6 +491,13 @@ async function runSmoke() {
   b = noteWin.getBounds();
   ok(Math.abs(b.width - HANDLE_W) <= 2, '收回磁吸至把手尺寸');
 
+  // v1.2.1 防挡：模拟窗口被外部改大（Windows DWM 命中区漂移路径），监护应自愈
+  noteWin.setBounds({ x: db.x - (NOTE_W - HANDLE_W), y: db.y, width: NOTE_W, height: 560 });
+  await wait(2500);
+  b = noteWin.getBounds();
+  ok(Math.abs(b.width - HANDLE_W) <= 2 && Math.abs(b.x - db.x) <= 4, '监护自愈：被改大后收敛回收起尺寸');
+  ok(noteWin.isVisible(), '自愈重现化后窗口保持可见');
+
   scheduler.tick(Date.now() + 6000);
   ok(smokeDue.length === 1 && smokeDue[0] === '冒烟任务A', '到点调度触发且不重复');
 
@@ -482,6 +534,7 @@ if (!app.requestSingleInstanceLock()) {
     setupIpc();
     createTray();
     scheduler.start(20000);
+    startWindowGuard(); // v1.2.1：窗口 bounds 与 mode 漂移自愈
 
     if (IS_SMOKE) {
       runSmoke().catch(err => { console.error(err); app.exit(1); });
