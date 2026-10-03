@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+<title>磁吸便签 · 到点提醒</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: transparent;
+    font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans SC', sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+
+  /* 全屏遮罩：压暗整个屏幕，无论用户在哪个应用上都以此为准 */
+  .veil { position: fixed; inset: 0; background: rgba(26, 17, 3, .84); cursor: pointer; }
+
+  .card { position: relative; width: 600px; max-width: 92vw; background: linear-gradient(180deg, #FFFBEF, #FFF3D2);
+    border: 2px solid rgba(243, 156, 18, .75); border-radius: 22px;
+    box-shadow: 0 24px 80px rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .6);
+    padding: 42px 46px 30px; text-align: center; color: #4A3000;
+    animation: pop .28s cubic-bezier(.2, 1.4, .4, 1); }
+  @keyframes pop { from { transform: scale(.82); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  .bell { font-size: 54px; line-height: 1; animation: swing 1.2s ease-in-out infinite; }
+  @keyframes swing { 0%, 100% { transform: rotate(-9deg); } 50% { transform: rotate(9deg); } }
+
+  .head { font-size: 30px; font-weight: 800; margin: 14px 0 6px; letter-spacing: 2px; }
+
+  .tasks { margin: 22px 0 26px; display: flex; flex-direction: column; gap: 14px; }
+  .task { background: #FFFFFF; border: 1px solid rgba(243, 156, 18, .4);
+    border-radius: 14px; padding: 16px 20px; }
+  .t-title { font-size: 24px; font-weight: 700; word-break: break-all; }
+  .t-meta { font-size: 13px; color: #B98A2E; margin-top: 6px; }
+  .t-meta .daily { display: inline-block; background: #8FA35C; color: #FFF;
+    border-radius: 6px; padding: 1px 7px; font-size: 11px; margin-right: 6px; }
+  .more { font-size: 13px; color: #B98A2E; }
+
+  .btns { display: flex; gap: 16px; justify-content: center; }
+  .btn { flex: 1; max-width: 240px; border: none; border-radius: 14px; padding: 16px 0;
+    font-size: 18px; font-weight: 800; cursor: pointer; font-family: inherit; }
+  .btn-done { background: #F39C12; color: #FFF; box-shadow: 0 6px 18px rgba(243, 156, 18, .45); }
+  .btn-done:hover { background: #E08E08; }
+  .btn-ack { background: #FFF; color: #9A6A10; border: 2px solid rgba(243, 156, 18, .55); }
+  .btn-ack:hover { background: #FFF3D6; }
+  .btn:active { transform: scale(.97); }
+
+  .kbd-hint { margin-top: 18px; font-size: 12px; color: #B98A2E; }
+  .kbd-hint b { background: #FFF; border: 1px solid rgba(185, 138, 46, .5); border-radius: 5px;
+    padding: 1px 7px; font-weight: 600; font-family: inherit; }
+</style>
+</head>
+<body>
+  <div class="veil" id="veil" title="点击 = 稍后处理"></div>
+  <div class="card" role="alertdialog" aria-label="到点提醒">
+    <div class="bell">⏰</div>
+    <div class="head">到点了</div>
+    <div class="tasks" id="tasks"></div>
+    <div class="btns">
+      <button class="btn btn-done" id="btnDone">✔ 完成它</button>
+      <button class="btn btn-ack" id="btnAck">稍后处理</button>
+    </div>
+    <div class="kbd-hint"><b>Enter</b> 完成它 · <b>Esc</b> 稍后处理</div>
+  </div>
+
+<script>
+  (function () {
+    const api = window.snapnote || window.__SNAPNOTE_MOCK__ || null; // 生产桥 / 无头验证 mock 同构
+    const box = document.getElementById('tasks');
+    let items = [];
+
+    function fmtHM(iso) {
+      const d = new Date(iso);
+      const p = (n) => (n < 10 ? '0' + n : '' + n);
+      return p(d.getHours()) + ':' + p(d.getMinutes());
+    }
+
+    function render() {
+      box.innerHTML = '';
+      items.slice(0, 5).forEach((t) => {
+        const el = document.createElement('div');
+        el.className = 'task';
+        const title = document.createElement('div');
+        title.className = 't-title';
+        title.textContent = t.title || '（无标题）';
+        const meta = document.createElement('div');
+        meta.className = 't-meta';
+        if (t.repeat === 'daily') {
+          const b = document.createElement('span');
+          b.className = 'daily';
+          b.textContent = '每天';
+          meta.appendChild(b);
+        }
+        meta.appendChild(document.createTextNode('原定 ' + fmtHM(t.dueAt || new Date().toISOString())));
+        el.appendChild(title);
+        el.appendChild(meta);
+        box.appendChild(el);
+      });
+      if (items.length > 5) {
+        const m = document.createElement('div');
+        m.className = 'more';
+        m.textContent = '以及另外 ' + (items.length - 5) + ' 项到期任务';
+        box.appendChild(m);
+      }
+    }
+
+    function act(a) { if (api && api.reminderAction) api.reminderAction(a); }
+
+    document.getElementById('btnDone').addEventListener('click', () => act('done'));
+    document.getElementById('btnAck').addEventListener('click', () => act('ack'));
+    document.getElementById('veil').addEventListener('click', () => act('ack'));
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); act('done'); }
+      if (e.key === 'Escape') { e.preventDefault(); act('ack'); }
+    });
+
+    if (api && api.onReminder) api.onReminder((tasks) => { items = tasks || []; render(); });
+    if (api && api.onReminderAdd) api.onReminderAdd((t) => { items.push(t); render(); });
+    // 无桥（纯浏览器直接打开）时的演示数据
+    if (!api) {
+      items = [
+        { title: '给客户回电话', dueAt: new Date(Date.now() + 60000).toISOString() },
+        { title: '吃维生素', dueAt: new Date(Date.now() + 60000).toISOString(), repeat: 'daily' },
+      ];
+      render();
+    }
+  })();
+</script>
+</body>
+</html>

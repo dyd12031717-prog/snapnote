@@ -324,6 +324,7 @@ function toggleMagnet() { mode === 'expanded' ? dock() : expand(); }
 
 /** 失焦 collapseDelay 秒后自动磁吸回右缘（PRD FR-03） */
 function scheduleCollapse() {
+  if (reminderWin && !reminderWin.isDestroyed()) return; // v1.4.0：全屏提醒期间便签不收起，等用户处理完
   clearTimeout(collapseTimer);
   const delay = Math.max(5, Number(store.settings.collapseDelay) || 30) * 1000;
   collapseTimer = setTimeout(dock, FAST ? Math.min(delay, 400) : delay);
@@ -410,22 +411,54 @@ function firstRunNotice() {
   }
 }
 
-// ============================================================ 到点提醒
+// ============================================================ 到点提醒（v1.4.0：全屏强提醒）
+let reminderWin = null;      // 单例：多条到期聚合进同一张全屏卡片
+let reminderQueue = [];      // 当前卡片承载的到期任务（关闭即清空，notified 已置不重弹）
+
 function onTaskDue(task) {
-  if (IS_SMOKE) { smokeDue.push(task.title); return; }
-  if (Notification.isSupported()) {
-    const isDaily = task.repeat === 'daily';
-    const when = isDaily
-      ? `每天 ${TimeFmt.fmtHM(new Date(task.dueAt))}`
-      : TimeFmt.formatDue(task.dueAt);
-    const n = new Notification({
-      title: isDaily ? '每日提醒 · 磁吸便签' : '到点提醒 · 磁吸便签',
-      body: `${task.title}（${when}）`,
-    });
-    n.on('click', expand);
-    n.show();
-  }
+  if (IS_SMOKE) smokeDue.push(task.title);
+  showReminder(task);
   if (noteWin && !noteWin.isDestroyed()) noteWin.webContents.send('due:alert', task);
+}
+
+function showReminder(task) {
+  reminderQueue.push(task);
+  if (reminderWin && !reminderWin.isDestroyed()) {
+    // 尚在加载中：did-finish-load 的 payload 快照会带上它，避免增量消息丢失
+    if (reminderWin.webContents.isLoading()) return;
+    try {
+      reminderWin.webContents.send('reminder:add', task);
+      reminderWin.focus();
+    } catch (e) { /* 窗口竞态销毁时静默 */ }
+    return;
+  }
+  createReminderWindow();
+}
+
+function createReminderWindow() {
+  const wa = workArea();
+  reminderWin = new BrowserWindow({
+    x: wa.x, y: wa.y, width: wa.width, height: wa.height,
+    frame: false, transparent: true, resizable: false, movable: false,
+    skipTaskbar: true, show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+  });
+  reminderWin.setAlwaysOnTop(true, 'screen-saver'); // 高于一切普通置顶窗
+  reminderWin.loadFile(path.join(ROOT, 'renderer', 'reminder.html'));
+  const send = () => {
+    try { reminderWin.webContents.send('reminder:payload', reminderQueue.slice()); } catch (e) { /* ignore */ }
+  };
+  if (reminderWin.webContents.isLoading()) {
+    reminderWin.webContents.once('did-finish-load', send);
+  } else send();
+  reminderWin.once('ready-to-show', () => {
+    try { reminderWin.show(); reminderWin.focus(); } catch (e) { /* ignore */ }
+  });
+  reminderWin.on('closed', () => { reminderWin = null; reminderQueue = []; });
+}
+
+function closeReminder() {
+  if (reminderWin && !reminderWin.isDestroyed()) reminderWin.close();
 }
 
 // ============================================================ IPC
@@ -455,6 +488,19 @@ function setupIpc() {
   });
   ipcMain.handle('update:download', () => { startDownload(); return updatePayload(); });
   ipcMain.handle('update:restart', () => { restartToUpdate(); return updatePayload(); });
+  ipcMain.on('reminder:action', (_e, act) => {
+    // v1.4.0：全屏提醒的两个出口——「完成它」勾掉任务；「稍后处理」仅关闭（notified 已置不重弹）
+    if (act === 'done') {
+      reminderQueue.forEach(t => {
+        const cur = store.list().find(x => x.id === t.id);
+        if (cur && !cur.done) store.toggle(t.id);
+      });
+    }
+    reminderQueue = [];
+    closeReminder();
+    pushState();
+  });
+
   ipcMain.on('magnet:expand', expand);
   ipcMain.on('magnet:dock', dock);
   ipcMain.on('magnet:keepalive', () => { if (mode === 'expanded') clearTimeout(collapseTimer); });
@@ -544,6 +590,29 @@ async function runSmoke() {
   scheduler.tick(Date.now() + 6500);
   ok(smokeDue.length === 2, '每日任务提醒后不重复');
 
+  // v1.4.0：到点全屏强提醒（真实窗口链路：出现 → 显示任务 → 稍后处理关闭）
+  await wait(600);
+  ok(reminderWin && !reminderWin.isDestroyed(), '到点弹出全屏提醒');
+  let rInfo = null;
+  try {
+    rInfo = await reminderWin.webContents.executeJavaScript(
+      "(() => ({ n: document.querySelectorAll('.task').length,"
+      + " first: (document.querySelector('.t-title') || {}).textContent || '' }))()");
+  } catch (e) { /* mock 环境：无页面 UI，跳过文案级断言 */ }
+  if (rInfo) {
+    ok(rInfo.n >= 2 && rInfo.first.indexOf('冒烟') >= 0,
+      `提醒卡片聚合显示到期任务（n=${rInfo.n} first=${rInfo.first}）`);
+  }
+  if (rInfo) {
+    // 真实环境：点真按钮 → 渲染层走 reminder:action IPC
+    await reminderWin.webContents.executeJavaScript('document.getElementById("btnAck").click()');
+  } else {
+    // mock 环境：无页面 UI，直接模拟渲染层发出同款 IPC
+    ipcMain.emit('reminder:action', null, 'ack');
+  }
+  await wait(500);
+  ok(reminderWin === null || reminderWin.isDestroyed(), '稍后处理关闭全屏提醒');
+
   showToast({ title: '早上好，今天有 2 个任务', body: '最早 09:30 部门周会' });
   await wait(900);
   ok(toastWin === null || toastWin.isDestroyed(), 'Toast 自动关闭');
@@ -564,7 +633,7 @@ if (!app.requestSingleInstanceLock()) {
     applyAutostart(store.settings.autostart);
     setupIpc();
     createTray();
-    scheduler.start(20000);
+    scheduler.start(FAST ? 300 : 20000); // FAST（测试/冒烟）下 300ms 一拍，便于驱动到点链路
     startWindowGuard(); // v1.2.1：窗口 bounds 与 mode 漂移自愈
 
     if (IS_SMOKE) {

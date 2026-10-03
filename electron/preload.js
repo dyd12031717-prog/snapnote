@@ -36,6 +36,11 @@ contextBridge.exposeInMainWorld('snapnote', {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   restartUpdate: () => ipcRenderer.invoke('update:restart'),
 
+  // 全屏强提醒（v1.4.0）
+  reminderAction: (act) => ipcRenderer.send('reminder:action', act),
+  onReminder: (cb) => ipcRenderer.on('reminder:payload', (_e, tasks) => cb(tasks)),
+  onReminderAdd: (cb) => ipcRenderer.on('reminder:add', (_e, t) => cb(t)),
+
   // Toast
   toastClick: () => ipcRenderer.send('toast:click'),
 });

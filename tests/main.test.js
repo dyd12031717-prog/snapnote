@@ -236,6 +236,61 @@ test('手动检查更新 IPC（v1.3.0）：check/download/restart + 状态推送
   }
 });
 
+test('到点全屏强提醒（v1.4.0）：due → 全屏窗 → 完成/稍后', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-rem-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron } = loadMain(null, userData);
+  const st = electron.__state;
+  await new Promise(r => setImmediate(r));
+
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
+
+  // 1) 加一条已过期任务 → FAST tick（300ms）到期触发
+  const past = new Date(Date.now() - 60000).toISOString();
+  await electron.ipcMain._invoke('tasks:add', { title: '强提醒任务A', dueAt: past });
+  await wait(900);
+
+  const remWin = st.windows.find(w => w.loadedFile
+    && String(w.loadedFile).endsWith(path.join('renderer', 'reminder.html')));
+  assert.ok(remWin, '到期应创建全屏提醒窗');
+  assert.strictEqual(remWin.opts.skipTaskbar, true, '提醒窗不应占任务栏');
+  assert.strictEqual(remWin.opts.frame, false, '提醒窗应为无边框全屏');
+  assert.deepStrictEqual(remWin._bounds, { x: 0, y: 0, width: 1600, height: 900 }, '提醒窗应覆盖整个工作区');
+
+  const pay = st.sent.filter(s => s.channel === 'reminder:payload');
+  assert.ok(pay.length >= 1, '应向提醒窗推送到期任务');
+  assert.ok(pay[0].data.some(t => t.title === '强提醒任务A'), '推送应含到期任务');
+
+  // 2) 聚合：提醒窗存活期间第二条到期 → reminder:add 增量
+  await electron.ipcMain._invoke('tasks:add', { title: '强提醒任务B', dueAt: past });
+  await wait(900);
+  const add = st.sent.filter(s => s.channel === 'reminder:add');
+  assert.ok(add.some(s => s.data.title === '强提醒任务B'), '第二条到期应增量推送而不新开窗口');
+  assert.strictEqual(st.windows.filter(w => w.loadedFile
+    && String(w.loadedFile).endsWith(path.join('renderer', 'reminder.html'))).length, 1, '提醒窗单例');
+
+  // 3) 稍后处理 → 窗口关闭、任务未完成、不重弹
+  electron.ipcMain.emit('reminder:action', { sender: null }, 'ack');
+  await new Promise(r => setImmediate(r));
+  assert.ok(remWin.isDestroyed(), '稍后处理应关闭提醒窗');
+  const ready1 = await electron.ipcMain._invoke('ui:ready');
+  assert.ok(ready1.tasks.some(t => t.title === '强提醒任务A' && !t.done), '稍后处理不勾任务');
+  await wait(900);
+  const remWin2 = st.windows.filter(w => w.loadedFile
+    && String(w.loadedFile).endsWith(path.join('renderer', 'reminder.html')));
+  assert.strictEqual(remWin2.length, 1, '已提醒任务不应重弹（沿用唯一窗口）');
+  assert.ok(remWin2[0].isDestroyed(), '已提醒任务不应重开提醒窗');
+
+  // 4) done 路径：再次到期前先重开（手动再造到期链路）
+  const past2 = new Date(Date.now() - 30000).toISOString();
+  await electron.ipcMain._invoke('tasks:add', { title: '强提醒任务C', dueAt: past2 });
+  await wait(900);
+  electron.ipcMain.emit('reminder:action', { sender: null }, 'done');
+  await new Promise(r => setImmediate(r));
+  const ready2 = await electron.ipcMain._invoke('ui:ready');
+  assert.ok(ready2.tasks.some(t => t.title === '强提醒任务C' && t.done), '完成它应勾掉任务');
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。

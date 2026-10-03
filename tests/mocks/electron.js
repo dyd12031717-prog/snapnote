@@ -21,6 +21,8 @@ class WebContents {
   send(channel, data) { state.sent.push({ win: this.win, channel, data }); }
   once(ev, cb) { this._once[ev] = cb; }
   emitOnce(ev) { if (this._once[ev]) { const cb = this._once[ev]; delete this._once[ev]; cb(); } }
+  // v1.4.0：冒烟链路会执行页面脚本；mock 无 UI，返回无结果由调用方守卫
+  executeJavaScript() { return Promise.resolve(undefined); }
 }
 
 class BrowserWindow {

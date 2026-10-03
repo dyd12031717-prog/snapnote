@@ -115,7 +115,8 @@
     }
     taskList.innerHTML = '';
     taskList.appendChild(frag);
-    taskList.scrollTop = taskList.scrollHeight; // 最新输入在底部可见
+    // v1.4.0：默认定位「进行中」区（未完成在顶部）；仅全部完成时才滚到底部展示成果
+    taskList.scrollTop = undone.length > 0 ? 0 : taskList.scrollHeight;
   }
 
   function sectionEl(text) {
@@ -179,7 +180,7 @@
       const el = document.createElement('button');
       el.className = 'chip' + (c.at === 'custom' ? ' chip-plain' : '');
       el.textContent = c.label;
-      el.addEventListener('click', () => {
+      el.addEventListener('click', (ev) => {
         if (c.at === 'custom') {
           customRow.hidden = false;
           if (!customTime.value) {
@@ -188,11 +189,15 @@
           }
           chipAt = null;
           markActive(null);
+          if (ev.detail > 0) setTimeout(() => customTime.focus(), 30); // 鼠标点开自定义→直接进时间输入
           return;
         }
         customRow.hidden = true;
         chipAt = (chipAt === c.at) ? null : c.at;
         markActive(chipAt ? c.label : null);
+        // v1.4.0：鼠标选完胶囊把焦点还给标题输入框——随后的 Enter 直接提交任务
+        // （ev.detail>0 = 鼠标触发；键盘 Enter 触发的 click detail=0，仍可正常键盘选择）
+        if (ev.detail > 0) setTimeout(() => taskInput.focus(), 0);
       });
       el.dataset.label = c.label;
       chipsBox.appendChild(el);
@@ -255,6 +260,15 @@
   taskInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); submitTask(); }
     if (e.key === 'Escape') { e.preventDefault(); api.dock(); }
+  });
+  customTime.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      // v1.4.0：自定义时间填完按 Enter —— 标题已写则直接提交任务，否则回到标题输入
+      e.preventDefault();
+      if (taskInput.value.trim()) submitTask();
+      else taskInput.focus();
+    }
+    if (e.key === 'Escape') { e.preventDefault(); customClear.click(); }
   });
   customClear.addEventListener('click', () => {
     customRow.hidden = true; customTime.value = ''; markActive(null);

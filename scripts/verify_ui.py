@@ -67,6 +67,12 @@ window.__SNAPNOTE_MOCK__ = {
     return this._state.update;
   },
   restartUpdate: async function(){ this._updateCalls.push('restart'); return this._state.update; },
+  // 全屏强提醒（v1.4.0）
+  _reminderActs: [], _reminderCbs: [],
+  reminderAction: function(a){ this._reminderActs.push(a); },
+  onReminder: function(cb){ this._reminderCbs.push(cb); },
+  onReminderAdd: function(cb){ this._reminderAddCb = cb; },
+  pushReminder: function(tasks){ this._reminderCbs.forEach(function(cb){ cb(tasks); }); },
   addTask: async function(title, dueAt, repeat){
     this._added.push({title: title, dueAt: dueAt, repeat: repeat || null});
     this._state.tasks.unshift({id:'t'+Date.now(), title:title, dueAt:dueAt||null,
@@ -124,6 +130,19 @@ def main():
         assert page.locator(".task", has_text="晚上买咖啡豆").count() == 1, "新任务应出现在列表"
         assert page.locator(".task", has_text="晚上买咖啡豆").locator(".duepill.daily").count() == 0, \
             "未开每天开关时不应有每日胶囊"
+
+        # 3.5) v1.4.0 焦点流转：鼠标点完胶囊焦点应回输入框，裸 Enter 直接提交
+        page.fill("#taskInput", "裸回车任务")
+        page.locator(".chip", has_text="1 小时后").first.click()
+        page.wait_for_timeout(200)
+        focused = page.evaluate("document.activeElement && document.activeElement.id")
+        assert focused == "taskInput", f"选完胶囊焦点应回到输入框，实际 {focused}"
+        page.keyboard.press("Enter")  # 不指定目标——作用于当前焦点
+        page.wait_for_timeout(250)
+        assert page.locator(".task", has_text="裸回车任务").count() == 1, "裸 Enter 应直接提交任务"
+        # v1.4.0 列表定位：有未完成任务时列表应在顶部（进行中区）
+        assert page.evaluate("document.getElementById('taskList').scrollTop") == 0, \
+            "打开/添加后列表应定位在「进行中」顶部"
 
         # 4) 录入每日任务：开关 → 胶囊文案变形 → 提交 → repeat 透传
         page.fill("#taskInput", "睡前冥想")
@@ -193,8 +212,32 @@ def main():
         assert "1.3.0" in spage.inner_text("#updateHint"), f"提示应含新版本号，实际 {spage.inner_text('#updateHint')}"
         spage.screenshot(path=str(OUT / "ui_settings.png"))
 
+        # 8) 全屏强提醒（v1.4.0）：到期聚合卡片 + 双按钮动作
+        rpage = browser.new_page(viewport={"width": 1280, "height": 800})
+        rpage.add_init_script(MOCK)
+        rpage.goto((ROOT / "reminder.html").as_uri())
+        rpage.wait_for_timeout(300)
+        rpage.evaluate(
+            "window.__SNAPNOTE_MOCK__.pushReminder(["
+            + f"{{title: '给客户回电话', dueAt: '{iso(TODAY, '10:30')}'}}, "
+            + f"{{title: '吃维生素', dueAt: '{iso(TOMORROW, '07:30')}', repeat: 'daily'}}])")
+        rpage.wait_for_timeout(200)
+        assert "到点了" in rpage.inner_text(".head"), "提醒卡应为到点提醒标题"
+        assert rpage.locator(".task").count() == 2, "应显示两条到期任务"
+        assert "给客户回电话" in rpage.locator(".t-title").first.inner_text()
+        assert "每天" in rpage.locator(".task").nth(1).inner_text(), "每日任务应带每天徽标"
+        rpage.screenshot(path=str(OUT / "ui_reminder.png"))
+        rpage.click("#btnAck")
+        acts = rpage.evaluate("window.__SNAPNOTE_MOCK__._reminderActs")
+        assert acts == ["ack"], f"稍后处理应发 ack 动作，实际 {acts}"
+        rpage.evaluate("window.__SNAPNOTE_MOCK__.pushReminder([{title: '合并提交', dueAt: '"
+            + iso(TODAY, "11:00") + "'}])")
+        rpage.click("#btnDone")
+        acts = rpage.evaluate("window.__SNAPNOTE_MOCK__._reminderActs")
+        assert acts == ["ack", "done"], f"按钮动作序列应为 ack→done，实际 {acts}"
+
         browser.close()
-    print("UI-VERIFY PASS (handle/note/add/daily/done/toast/settings)")
+    print("UI-VERIFY PASS (handle/note/add/focus/daily/done/toast/settings/reminder)")
     return 0
 
 if __name__ == "__main__":
