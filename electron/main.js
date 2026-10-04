@@ -35,9 +35,16 @@ if (process.env.SNAPNOTE_USER_DATA) {
 // E2E 剪贴板写桥（SNAPNOTE_E2E_CLIPBRIDGE 门控）：无头环境里渲染进程的
 // navigator.clipboard 因无用户激活被拒——测试用它模拟"用户复制"动作，
 // 主进程轮询视角下与真实复制不可区分（同一条系统剪贴板）。生产零暴露。
+// 文本：传字符串；图片：传 {imageDataUrl}（canvas 生成后注入，验证图片捕获全链路）。
 if (process.env.SNAPNOTE_E2E_CLIPBRIDGE) {
   app.whenReady().then(() => {
-    ipcMain.on('e2e:write-clipboard', (_e, t) => { clipboard.writeText(String(t)); });
+    ipcMain.on('e2e:write-clipboard', (_e, t) => {
+      if (t && typeof t === 'object' && t.imageDataUrl) {
+        clipboard.writeImage(nativeImage.createFromDataURL(String(t.imageDataUrl)));
+      } else {
+        clipboard.writeText(String(t));
+      }
+    });
   }).catch(() => {});
 }
 
@@ -589,15 +596,24 @@ function memoStatePayload() {
   };
 }
 
-/** 悬浮捕获气泡：右下角、无框、置顶、不抢焦点 */
+/** 悬浮捕获气泡：右下角、无框、置顶、不抢焦点。
+ *  v1.5.4：图片气泡窗口高度随图片宽高比自适应（竖长图不再压成细条、
+ *  横图不留大片空白）；文本气泡维持固定尺寸。
+ */
 function showCaptureBubble(pending) {
   if (captureWin && !captureWin.isDestroyed()) { try { captureWin.destroy(); } catch (e) {} }
   pendingCapture = pending;
   const wa = screen.getPrimaryDisplay().workArea;
+  // 预览区可用尺寸：宽 ~340（窗口 396 - 双侧留白），高上限 300
+  let h = CAPTURE_H;
+  if (pending.type === 'image' && pending.w && pending.h) {
+    const scale = Math.min(340 / pending.w, 300 / pending.h, 1);
+    h = Math.max(CAPTURE_H, Math.min(560, Math.round(pending.h * scale) + 140));
+  }
   captureWin = new BrowserWindow({
     x: wa.x + wa.width - CAPTURE_W - 16,
-    y: wa.y + wa.height - CAPTURE_H - 12,
-    width: CAPTURE_W, height: CAPTURE_H,
+    y: wa.y + wa.height - h - 12,
+    width: CAPTURE_W, height: h,
     frame: false, resizable: false, movable: false,
     skipTaskbar: true, focusable: false, alwaysOnTop: true, show: false,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
@@ -645,7 +661,7 @@ function onClipboardTick() {
       const saved = saveMemoImage(clip.img);
       showCaptureBubble({
         type: 'image', imageHash: saved.hash, w: saved.w, h: saved.h,
-        thumbDataURL: thumbDataURLFor(clip.img, 180), source: 'clipboard',
+        thumbDataURL: thumbDataURLFor(clip.img, 360), source: 'clipboard',
       });
     } else {
       showCaptureBubble({ type: 'text', text: clip.text, source: 'clipboard' });

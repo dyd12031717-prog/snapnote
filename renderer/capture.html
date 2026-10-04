@@ -19,13 +19,15 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #7CB342; box-shadow: 0 0 6px #7CB34288; }
   .head .t { font-size: 13px; font-weight: 600; color: #6B4E1E; letter-spacing: .5px; }
   .head .hint { margin-left: auto; font-size: 11px; color: #A08650; }
-  .preview { margin: 0 14px; padding: 10px 12px; background: #FFFFFF;
-    border: 1px solid #EFE4CC; border-radius: 10px; flex: 0 0 auto; min-height: 64px;
+  .preview { margin: 0 14px; padding: 8px 10px; background: #FFFFFF;
+    border: 1px solid #EFE4CC; border-radius: 10px; flex: 0 0 auto; min-height: 44px;
     display: flex; align-items: center; justify-content: center; }
   .preview.txt { font-size: 13px; line-height: 1.55; color: #4A3000; max-height: 84px; overflow: hidden;
     display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
     text-align: left; justify-content: flex-start; white-space: pre-wrap; word-break: break-all; }
-  .preview img { max-width: 100%; max-height: 82px; border-radius: 6px; object-fit: contain; }
+  /* v1.5.4：图片预览等比放大（窗口高度已随图片比例自适应），竖长图不再压细条 */
+  .preview img { max-width: 100%; max-height: 300px; width: auto; height: auto;
+    border-radius: 6px; object-fit: contain; }
   .chips { display: flex; gap: 6px; padding: 10px 14px 0; flex-wrap: wrap; }
   .chip { font-size: 11px; padding: 4px 10px; border-radius: 999px; background: #F5EDDA;
     color: #6B4E1E; border: 1px solid #E8DBBB; cursor: pointer; max-width: 100px;
