@@ -149,18 +149,32 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
  * 流式下载到文件（兼容 Web stream 与 Node stream 两种 body），onProgress(done, total)。
  * v1.5.1：firstByteMs 首字节超时——连接建立后迟迟没有数据（镜像劣化/半死连接）
  * 则中止换源，避免用户对着 0% 干等。
+ * v1.5.3：
+ *  - offset 断点续传：换源时带上已下载字节（Range: bytes=offset-，append 写入，
+ *    进度从断点继续——用户不再看到 99%→0% 回跳）；服务器忽略 Range 返回 200
+ *    全量时自动降级为整文件重写。
+ *  - 截断检测：结束时比对实际字节数与 Content-Length，不符即抛错——
+ *    连接被"优雅"掐断时流会正常 end 但数据不全，不能等到 sha256 才发现。
  */
-async function downloadToFile(url, destPath, onProgress, deps, firstByteMs) {
-  const res = await deps.fetch(url);
+async function downloadToFile(url, destPath, onProgress, deps, firstByteMs, offset) {
+  const off = offset && offset > 0 ? offset : 0;
+  const headers = off > 0 ? { Range: `bytes=${off}-` } : undefined;
+  const res = await deps.fetch(url, headers ? { headers } : undefined);
   if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
-  const total = Number(res.headers && res.headers.get('content-length')) || 0;
+  // 服务器忽略 Range（返回 200 全量）→ 重头写；206 → 续传
+  const isResume = off > 0 && res.status === 206;
+  if (off > 0 && res.status !== 206 && res.status !== 200) {
+    throw new Error(`续传失败 HTTP ${res.status}`);
+  }
+  const contentLength = Number(res.headers && res.headers.get('content-length')) || 0;
+  const total = contentLength ? (isResume ? off + contentLength : contentLength) : 0;
   const Readable = require('stream').Readable;
   const body = (typeof res.body && typeof res.body.pipe === 'function')
     ? res.body
     : Readable.fromWeb(res.body);
   await new Promise((resolve, reject) => {
-    const ws = fs.createWriteStream(destPath);
-    let done = 0;
+    const ws = fs.createWriteStream(destPath, isResume ? { flags: 'a' } : undefined);
+    let done = isResume ? off : 0;
     let stallTimer = null;
     const armStall = (ms, msg) => {
       if (stallTimer) clearTimeout(stallTimer);
@@ -174,11 +188,27 @@ async function downloadToFile(url, destPath, onProgress, deps, firstByteMs) {
       done += chunk.length;
       if (onProgress) onProgress(done, total);
     });
-    body.on('error', (e) => { clearStall(); try { ws.destroy(); } catch (x) {} reject(e); });
+    body.on('error', (e) => {
+      clearStall();
+      // end()（而非 destroy）刷盘后再 reject：半截文件是续传资本；
+      // 且 reject 必须等落盘完成——否则换源逻辑读到 0 字节/文件不存在
+      try { ws.end(() => reject(e)); } catch (x) { reject(e); }
+    });
     ws.on('error', (e) => { clearStall(); try { body.destroy(); } catch (x) {} reject(e); });
     ws.on('finish', () => { clearStall(); resolve(); });
     body.pipe(ws);
     if (firstByteMs) armStall(firstByteMs, `下载源 ${firstByteMs}ms 内无数据（切换下一个源）`);
+    body.on('end', () => {
+      // 截断检测：流正常结束但字节数不足（连接被优雅掐断的典型表现）
+      if (total && done < total) {
+        clearStall();
+        try {
+          ws.end(() => reject(new Error(`文件不完整：${done}/${total} 字节（断流，将断点续传）`)));
+        } catch (x) {
+          reject(new Error(`文件不完整：${done}/${total} 字节（断流，将断点续传）`));
+        }
+      }
+    });
   });
   return destPath;
 }
@@ -196,9 +226,14 @@ async function sha256File(p) {
 }
 
 /**
- * 多源下载 + 完整性校验（v1.5.1 国内加速）。
- * 源顺序：有官方校验值时 [镜像1, 镜像2, ..., 官方]（镜像下完校验，不符即弃换源）；
- * 无校验值时仅 [官方]（不信任任何镜像提供的可执行文件——内容真伪无从核验）。
+ * 多源下载 + 完整性校验（v1.5.1 国内加速 / v1.5.3 断点续传）。
+ * 源顺序：有官方校验值时 [镜像1, 镜像2, ..., 官方]；无校验值时仅 [官方]
+ * （不信任任何镜像提供的可执行文件——内容真伪无从核验）。
+ * v1.5.3 续传策略：某源中途失败（断流/截断/停滞）时**保留已下载字节**，
+ * 下一个源带 Range 从断点续传（进度连续，不再 99%→0% 回跳）；
+ * 仅当 sha256 校验不符（内容被污染）或目标不存在时才整文件重来。
+ * 全部源失败 → 抛最后一个错误（保留部分文件供用户重试时续传——
+ * 由 download() 的 workDir 隔离，重试进程会重新开始，可接受）。
  * @returns {Promise<{path, via}>} via = 'mirror' | 'official'
  */
 async function downloadVerified(origUrl, destPath, expectedSha256, onProgress, deps, log, firstByteMs) {
@@ -209,15 +244,17 @@ async function downloadVerified(origUrl, destPath, expectedSha256, onProgress, d
   }
   sources.push({ url: origUrl, via: 'official' });
   let lastErr = null;
+  let offset = 0;
   for (let i = 0; i < sources.length; i++) {
     const s = sources[i];
     try {
-      if (log) log(`下载源 ${i + 1}/${sources.length}（${s.via}）`);
-      await downloadToFile(s.url, destPath, onProgress, deps, s.via === 'mirror' ? fbMs : 0);
+      if (log) log(`下载源 ${i + 1}/${sources.length}（${s.via}${offset > 0 ? `，断点续传 ${offset} 字节` : ''}）`);
+      await downloadToFile(s.url, destPath, onProgress, deps, s.via === 'mirror' ? fbMs : 0, offset);
       if (expectedSha256) {
         const actual = await sha256File(destPath);
         if (actual !== expectedSha256) {
           try { fs.rmSync(destPath, { force: true }); } catch (e) { /* ignore */ }
+          offset = 0; // 内容与官方指纹不符：续传的字节可能已被污染，整文件重来
           throw new Error(`校验失败：下载内容与官方 sha256 不符（已弃用该下载源）`);
         }
         if (log) log('sha256 校验通过');
@@ -226,7 +263,11 @@ async function downloadVerified(origUrl, destPath, expectedSha256, onProgress, d
     } catch (e) {
       lastErr = e;
       if (log) log(`源失败：${e.message}`);
-      try { fs.rmSync(destPath, { force: true }); } catch (x) { /* ignore */ }
+      // 断流/截断类失败：保留已下载部分（续传）；文件被删（校验失败）则 offset 归 0
+      try {
+        offset = fs.existsSync(destPath) ? fs.statSync(destPath).size : 0;
+        if (offset === 0 && fs.existsSync(destPath)) { /* 空文件等同从 0 */ }
+      } catch (x) { offset = 0; }
     }
   }
   throw lastErr || new Error('全部下载源失败');

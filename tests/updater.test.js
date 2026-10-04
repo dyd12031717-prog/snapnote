@@ -16,19 +16,47 @@ const {
 const crypto = require('crypto');
 function sha256buf(b) { return crypto.createHash('sha256').update(b).digest('hex'); }
 
-/** mock fetch：按 URL 前缀/精确匹配返回不同 body（node stream 或挂起 stream） */
+/** mock fetch：按 URL 前缀/精确匹配返回不同 body。
+ *  路由标记：body='STALL'（挂起流）；truncate:true（只发前半，模拟优雅断流）；
+ *  range:true（读取请求 Range 头返回剩余部分 + 206，模拟断点续传服务）；
+ *  status:206（无 Range 请求也回 206，异常场景）。
+ *  calls 保持 URL 字符串数组（兼容旧断言），callsFull 额外记录请求头。
+ */
 function mockFetch(routes) {
   const calls = [];
-  const fn = async (url) => {
-    calls.push(url);
+  const callsFull = [];
+  const fn = async (url, opts) => {
+    calls.push(String(url));
+    callsFull.push({ url: String(url), headers: (opts && opts.headers) || null });
     const hit = routes.find((r) => (r.match === 'exact' ? r.url === url : String(url).startsWith(r.url)));
     if (!hit) return { ok: false, status: 404, headers: { get: () => null }, body: Readable.from([]) };
     if (hit.body === 'STALL') { // 永不吐数据的挂起流（测首字节超时）
       return { ok: true, status: 200, headers: { get: () => '100' }, body: new Readable({ read() { /* 不 push，挂着 */ } }) };
     }
-    const body = typeof hit.body === 'string' ? Buffer.from(hit.body) : hit.body;
+    const raw = typeof hit.body === 'string' ? Buffer.from(hit.body) : hit.body;
+    if (hit.truncate) { // 优雅断流：只给前一半，Content-Length 仍报完整长度
+      const half = raw.subarray(0, Math.floor(raw.length / 2));
+      return {
+        ok: true, status: 200,
+        headers: { get: (k) => (k === 'content-length' ? String(raw.length) : null) },
+        body: Readable.from([half]),
+      };
+    }
+    if (hit.range) { // 断点续传服务：读 Range 头返回 206 + 剩余字节
+      const m = /bytes=(\d+)-/.exec(String((opts && opts.headers && opts.headers.Range) || ''));
+      const start = m ? Number(m[1]) : 0;
+      const rest = raw.subarray(Math.min(start, raw.length));
+      return {
+        ok: true, status: 206,
+        headers: { get: (k) => (k === 'content-length' ? String(rest.length) : null) },
+        body: Readable.from([rest]),
+        text: async () => rest.toString(),
+        json: async () => JSON.parse(rest.toString()),
+      };
+    }
+    const body = raw;
     return {
-      ok: true, status: 200,
+      ok: true, status: hit.status || 200,
       headers: { get: (k) => (k === 'content-length' ? String(body.length) : null) },
       body: Readable.from([body]),
       text: async () => body.toString(),
@@ -36,6 +64,7 @@ function mockFetch(routes) {
     };
   };
   fn.calls = calls;
+  fn.callsFull = callsFull;
   return fn;
 }
 
@@ -184,7 +213,7 @@ test('Updater.download：写 zip 到临时目录', async () => {
     if (url.includes('/releases/latest')) {
       return { ok: true, status: 200, json: async () => RELEASE };
     }
-    return { ok: true, status: 200, headers: { get: () => '11' }, body: Readable.from([Buffer.from('zip-bytes')]) };
+    return { ok: true, status: 200, headers: { get: () => '9' }, body: Readable.from([Buffer.from('zip-bytes')]) };
   };
   await u.check();
   const zip = await u.download();
@@ -341,4 +370,67 @@ test('Updater check→download 全链路：拉官方校验值 + 镜像下载 + �
   assert.equal(u.downloadVia, 'mirror', '有校验值时优先镜像');
   assert.equal(fs.readFileSync(p).toString(), zip.toString());
   assert.ok(!fetch.calls.includes(ORIG), '镜像成功则官方源零请求');
+});
+
+// ------------------------------------------------------------ 断点续传（v1.5.3）
+test('downloadVerified：镜像 99% 断流 → 下一源 Range 续传拼接完整（进度不回 0）', async () => {
+  const full = Buffer.alloc(4096, 9);
+  const fetch = mockFetch([
+    { url: 'https://gh-proxy.com/', body: full, truncate: true },  // 镜像1：下到一半优雅断流
+    { url: 'https://ghfast.top/', body: full, range: true },       // 镜像2：支持续传
+  ]);
+  const dest = tmpDest();
+  const progress = [];
+  const r = await downloadVerified(ORIG, dest, sha256buf(full),
+    (done, total) => progress.push([done, total]), { fetch }, null, 100);
+  assert.equal(r.via, 'mirror');
+  assert.equal(fs.readFileSync(dest).length, full.length, '拼接后完整');
+  assert.equal(await sha256File(dest), sha256buf(full), '整文件校验通过（不同源拼接由 sha256 把关）');
+  // 续传请求带 Range 且起点 = 断流时已写字节（一半）
+  const resumeCall = fetch.callsFull.find(c => c.url.startsWith('https://ghfast.top/'));
+  const half = Math.floor(full.length / 2);
+  assert.equal(resumeCall.headers.Range, `bytes=${half}-`, '续传请求从断点开始');
+  // 进度单调不减（核心 UX：不再 99%→0% 回跳）
+  let max = 0;
+  for (const [done] of progress) { assert.ok(done >= max, '进度单调不减'); max = Math.max(max, done); }
+  assert.equal(max, full.length);
+});
+
+test('downloadToFile：截断检测——流正常结束但字节数不足必须抛错', async () => {
+  const full = Buffer.from('0123456789ABCDEF');
+  const fetch = mockFetch([{ url: ORIG, match: 'exact', body: full, truncate: true }]);
+  const dest = tmpDest();
+  await assert.rejects(
+    () => downloadToFile(ORIG, dest, null, { fetch }, null, 0),
+    /文件不完整/,
+  );
+  assert.equal(fs.statSync(dest).size, 8, '半个文件保留在盘上（供续传）');
+});
+
+test('downloadVerified：镜像断流 + 下一源忽略 Range 返回 200 全量 → 重写完整', async () => {
+  const full = Buffer.alloc(2048, 5);
+  const fetch = mockFetch([
+    { url: 'https://gh-proxy.com/', body: full, truncate: true },
+    { url: 'https://ghfast.top/', body: full },  // 不带 range 标记：收到 Range 也回 200 全量
+  ]);
+  const dest = tmpDest();
+  const r = await downloadVerified(ORIG, dest, sha256buf(full), null, { fetch }, null, 100);
+  assert.equal(r.via, 'mirror');
+  assert.equal(fs.readFileSync(dest).length, full.length, '200 回退整文件重写，无重复拼接');
+});
+
+test('downloadVerified：校验失败（内容污染）→ 删文件从 0 重来（不续传污染字节）', async () => {
+  const good = Buffer.alloc(1024, 1);
+  const bad = Buffer.alloc(1024, 2);
+  const fetch = mockFetch([
+    { url: 'https://gh-proxy.com/', body: bad },                  // 镜像1：完整但内容错
+    { url: 'https://ghfast.top/', body: good, range: true },      // 镜像2：正确
+  ]);
+  const dest = tmpDest();
+  const r = await downloadVerified(ORIG, dest, sha256buf(good), null, { fetch }, null, 100);
+  assert.equal(r.via, 'mirror');
+  // 镜像2 的请求不带 Range（校验失败后 offset 已归 0）
+  const c2 = fetch.callsFull.find(c2 => c2.url.startsWith('https://ghfast.top/'));
+  assert.equal(c2.headers, null, '校验失败后必须整文件重来（无 Range 头）');
+  assert.equal(fs.readFileSync(dest).length, good.length);
 });
