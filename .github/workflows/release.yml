@@ -59,10 +59,20 @@ jobs:
           SNAPNOTE_FAST: '1'
         timeout-minutes: 4
 
+      - name: 生成 sha256 校验文件（v1.5.1：客户端国内镜像加速的前置信任锚）
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem "release\SnapNote-Portable-*-win-x64.zip" | Select-Object -First 1
+          $hash = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+          "$hash  $($zip.Name)" | Out-File -Encoding ascii -NoNewline "release\$($zip.Name).sha256"
+          Write-Host "sha256: $hash"
+
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release/SnapNote-Portable-*-win-x64.zip
+          files: |
+            release/SnapNote-Portable-*-win-x64.zip
+            release/SnapNote-Portable-*-win-x64.zip.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
 

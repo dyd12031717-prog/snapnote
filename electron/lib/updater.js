@@ -14,9 +14,23 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const cp = require('child_process');
+const crypto = require('crypto');
 
 const GITHUB_API = 'https://api.github.com';
 const PLACEHOLDER_OWNER = '__REPLACE_ME__';
+
+/**
+ * v1.5.1 国内下载加速镜像（拼接方式：域名 + 完整 GitHub 下载 URL）。
+ * 仅在官方 sha256 校验值可用时启用——镜像内容必须通过校验才被采用，
+ * 校验不符自动弃用换源，最后兜底回官方直连。镜像服务是第三方公益项目，
+ * 任一失效只影响速度不影响正确性。
+ */
+const DOWNLOAD_MIRRORS = [
+  'https://gh-proxy.com/',
+  'https://ghfast.top/',
+];
+/** 镜像源首字节超时：迟迟无数据即切换（官方源不限——慢是它的常态） */
+const FIRST_BYTE_MS = 12000;
 
 /** PS 单引号字符串转义：' → '' */
 function psEscape(s) {
@@ -44,9 +58,22 @@ function pickAsset(release) {
   return { name: hit.name, url: hit.browser_download_url, size: hit.size || 0 };
 }
 
+/** 挑出配套 .sha256 校验文件 asset（无则 null） */
+function pickChecksumAsset(release) {
+  const assets = (release && release.assets) || [];
+  const hit = assets.find((a) => /^SnapNote-Portable.*win-x64\.zip\.sha256$/i.test(String(a && a.name)));
+  return hit ? { name: hit.name, url: hit.browser_download_url } : null;
+}
+
+/** 解析 .sha256 文件内容（"hash  filename" 格式）取 hash */
+function parseChecksum(text) {
+  const m = String(text || '').match(/\b([0-9a-f]{64})\b/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
 /**
  * 解析 GitHub Releases/latest 响应：
- * 返回 { hasUpdate, version, notes, asset }；结构异常返回 null。
+ * 返回 { hasUpdate, version, notes, asset, checksumAsset }；结构异常返回 null。
  */
 function parseRelease(release, currentVersion) {
   if (!release || !release.tag_name) return null;
@@ -57,6 +84,7 @@ function parseRelease(release, currentVersion) {
     version,
     notes: String(release.body || '').slice(0, 600),
     asset,
+    checksumAsset: pickChecksumAsset(release),
   };
 }
 
@@ -117,8 +145,12 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
   ].join('\n');
 }
 
-/** 流式下载到文件（兼容 Web stream 与 Node stream 两种 body），onProgress(done, total) */
-async function downloadToFile(url, destPath, onProgress, deps) {
+/**
+ * 流式下载到文件（兼容 Web stream 与 Node stream 两种 body），onProgress(done, total)。
+ * v1.5.1：firstByteMs 首字节超时——连接建立后迟迟没有数据（镜像劣化/半死连接）
+ * 则中止换源，避免用户对着 0% 干等。
+ */
+async function downloadToFile(url, destPath, onProgress, deps, firstByteMs) {
   const res = await deps.fetch(url);
   if (!res.ok) throw new Error(`下载失败 HTTP ${res.status}`);
   const total = Number(res.headers && res.headers.get('content-length')) || 0;
@@ -129,16 +161,75 @@ async function downloadToFile(url, destPath, onProgress, deps) {
   await new Promise((resolve, reject) => {
     const ws = fs.createWriteStream(destPath);
     let done = 0;
+    let stallTimer = null;
+    const armStall = (ms, msg) => {
+      if (stallTimer) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        try { body.destroy(new Error(msg)); } catch (x) { /* ignore */ }
+      }, ms);
+    };
+    const clearStall = () => { if (stallTimer) { clearTimeout(stallTimer); stallTimer = null; } };
     body.on('data', (chunk) => {
+      if (firstByteMs) armStall(30000, '下载数据流停滞（切换下一个源）'); // 每块数据后重置停滞计时
       done += chunk.length;
       if (onProgress) onProgress(done, total);
     });
-    body.on('error', reject);
-    ws.on('error', reject);
-    ws.on('finish', resolve);
+    body.on('error', (e) => { clearStall(); try { ws.destroy(); } catch (x) {} reject(e); });
+    ws.on('error', (e) => { clearStall(); try { body.destroy(); } catch (x) {} reject(e); });
+    ws.on('finish', () => { clearStall(); resolve(); });
     body.pipe(ws);
+    if (firstByteMs) armStall(firstByteMs, `下载源 ${firstByteMs}ms 内无数据（切换下一个源）`);
   });
   return destPath;
+}
+
+/** 文件 sha256（流式，大包不吃内存） */
+async function sha256File(p) {
+  const h = crypto.createHash('sha256');
+  await new Promise((resolve, reject) => {
+    const rs = fs.createReadStream(p);
+    rs.on('data', (d) => h.update(d));
+    rs.on('error', reject);
+    rs.on('end', resolve);
+  });
+  return h.digest('hex');
+}
+
+/**
+ * 多源下载 + 完整性校验（v1.5.1 国内加速）。
+ * 源顺序：有官方校验值时 [镜像1, 镜像2, ..., 官方]（镜像下完校验，不符即弃换源）；
+ * 无校验值时仅 [官方]（不信任任何镜像提供的可执行文件——内容真伪无从核验）。
+ * @returns {Promise<{path, via}>} via = 'mirror' | 'official'
+ */
+async function downloadVerified(origUrl, destPath, expectedSha256, onProgress, deps, log, firstByteMs) {
+  const fbMs = firstByteMs != null ? firstByteMs : FIRST_BYTE_MS;
+  const sources = [];
+  if (expectedSha256) {
+    for (const m of DOWNLOAD_MIRRORS) sources.push({ url: m + origUrl, via: 'mirror' });
+  }
+  sources.push({ url: origUrl, via: 'official' });
+  let lastErr = null;
+  for (let i = 0; i < sources.length; i++) {
+    const s = sources[i];
+    try {
+      if (log) log(`下载源 ${i + 1}/${sources.length}（${s.via}）`);
+      await downloadToFile(s.url, destPath, onProgress, deps, s.via === 'mirror' ? fbMs : 0);
+      if (expectedSha256) {
+        const actual = await sha256File(destPath);
+        if (actual !== expectedSha256) {
+          try { fs.rmSync(destPath, { force: true }); } catch (e) { /* ignore */ }
+          throw new Error(`校验失败：下载内容与官方 sha256 不符（已弃用该下载源）`);
+        }
+        if (log) log('sha256 校验通过');
+      }
+      return { path: destPath, via: s.via };
+    } catch (e) {
+      lastErr = e;
+      if (log) log(`源失败：${e.message}`);
+      try { fs.rmSync(destPath, { force: true }); } catch (x) { /* ignore */ }
+    }
+  }
+  throw lastErr || new Error('全部下载源失败');
 }
 
 class Updater {
@@ -186,6 +277,16 @@ class Updater {
     });
     if (!res.ok) throw new Error(`更新检查失败 HTTP ${res.status}`);
     this.lastCheck = parseRelease(await res.json(), this.currentVersion);
+    // v1.5.1：顺带拉取官方 sha256 校验值（几十字节，走官方源不影响速度）。
+    // 拉不到（旧版本 Release 无此文件/网络抖动）→ 下载时仅走官方源，安全不降级。
+    this.expectedChecksum = null;
+    const ca = this.lastCheck && this.lastCheck.checksumAsset;
+    if (ca && ca.url) {
+      try {
+        const r2 = await this.deps.fetch(ca.url);
+        if (r2.ok) this.expectedChecksum = parseChecksum(await r2.text());
+      } catch (e) { /* 校验值拉取失败按无校验处理 */ }
+    }
     return this.lastCheck;
   }
 
@@ -196,7 +297,11 @@ class Updater {
     const workDir = path.join(this.deps.tmpdir(), `snapnote-update-${Date.now()}`);
     fs.mkdirSync(workDir, { recursive: true });
     this.zipPath = path.join(workDir, 'update.zip');
-    await downloadToFile(info.asset.url, this.zipPath, onProgress, this.deps);
+    const r = await downloadVerified(
+      info.asset.url, this.zipPath, this.expectedChecksum,
+      onProgress, this.deps, (m) => this.deps.log('updater:', m),
+    );
+    this.downloadVia = r.via; // 'mirror' | 'official'（诊断用：用户报"慢"时看走了哪个源）
     return this.zipPath;
   }
 
@@ -233,10 +338,16 @@ module.exports = {
   Updater,
   compareVersions,
   pickAsset,
+  pickChecksumAsset,
+  parseChecksum,
   parseRelease,
   buildUpdateScript,
   downloadToFile,
+  downloadVerified,
+  sha256File,
   psEscape,
   GITHUB_API,
   PLACEHOLDER_OWNER,
+  DOWNLOAD_MIRRORS,
+  FIRST_BYTE_MS,
 };
