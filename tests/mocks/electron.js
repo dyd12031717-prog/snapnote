@@ -49,6 +49,7 @@ class BrowserWindow {
   destroy() { this._destroyed = true; this._handlers.emit('closed'); }
   close() { this.destroy(); }
   on(ev, cb) { this._handlers.on(ev, cb); }
+  once(ev, cb) { this._handlers.once(ev, cb); } // v1.5.2：捕获气泡 ready-to-show 用
   emitWin(ev) { this._handlers.emit(ev); }
 }
 

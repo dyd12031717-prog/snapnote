@@ -382,6 +382,48 @@ test('备忘录 v1.5.0：IPC CRUD 全链路 + 多快捷键注册 + 捕获豁免'
   assert.ok(p.memo && p.memo.count === 1 && p.memo.captureOn === true, 'payload.memo 徽章数据');
 });
 
+test('剪贴板图片捕获（v1.5.2 图片优先）：连带文本的图片不误收为路径', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-clipimg-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron, main } = loadMain(null, userData);
+  const st = electron.__state;
+  await new Promise(r => setImmediate(r));
+
+  // 模拟 Windows 真实场景：资源管理器 Ctrl+C 图片文件 / Word 复制内嵌图——
+  // 剪贴板同时有图片位图与文本（文件路径/备用文本）
+  const fakeImg = {
+    isEmpty: () => false,
+    toPNG: () => Buffer.from('PNGDATA-v152'),
+    toJPEG: () => Buffer.from('JPGDATA'),
+    getSize: () => ({ width: 800, height: 600 }),
+    resize: () => fakeImg,
+  };
+  st.clipImage = fakeImg;
+  st.clipText = 'D:\\pictures\\a.png';
+
+  // FAST 模式轮询 400ms 一拍，等两拍
+  await new Promise(r => setTimeout(r, 1100));
+
+  const payloads = st.sent.filter(s => s.channel === 'capture:payload');
+  assert.ok(payloads.length >= 1, '捕获气泡应触发');
+  const cp = payloads[payloads.length - 1].data;
+  assert.equal(cp.type, 'image', '图片优先：有图片时绝不能落入文本分支');
+  assert.ok(cp.preview, '图片气泡带缩略预览');
+  // 图片资产落盘（hash 内容寻址）
+  const assetsDir = path.join(userData, 'memo-assets');
+  assert.ok(fs.existsSync(assetsDir), '资产目录已建');
+  const files = fs.readdirSync(assetsDir);
+  assert.ok(files.some(f => f.endsWith('.png')), '原图已落盘');
+
+  // 清场：销毁气泡（capture:ignore）+ 恢复剪贴板 mock
+  electron.ipcMain._invoke ? null : null;
+  const { ipcMain } = electron;
+  // ignore 是 on 通道——直接调用窗口 destroy（captureWin 内部）
+  // 简化：置空剪贴板内容后气泡自然不再重复弹（同一 fp 只弹一次）
+  st.clipImage = null;
+  st.clipText = '';
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。

@@ -18,7 +18,7 @@ const { Updater } = require('./lib/updater');
 const { MemoStore, ROOT_CATEGORY_ID, sha256: sha256hex } = require('./lib/memo');
 const TimeFmt = require('./lib/timeparse');
 const crypto = require('crypto');
-const { URL: NodeURL } = require('url');
+const { pathToFileURL } = require('url'); // v1.5.2 修正：pathToFileURL 是模块级导出（曾误作 URL 类方法，致图片气泡静默失败）
 
 const IS_SMOKE = process.argv.includes('--smoke-test');
 const FAST = IS_SMOKE || process.env.SNAPNOTE_FAST === '1'; // 测试/演示用：缩短收起与 Toast 延时
@@ -528,19 +528,24 @@ function saveMemoImage(nativeImg) {
     } catch (e) { /* 缩略失败不阻断，详情用原图 */ }
   }
   const sz = nativeImg.getSize();
-  return { hash, w: sz.width, h: sz.height, thumbUrl: NodeURL.pathToFileURL(thumb).href };
+  return { hash, w: sz.width, h: sz.height, thumbUrl: pathToFileURL(thumb).href };
 }
 
-/** 读取剪贴板 → {type, fp, text?, img?}；空返回 null */
+/** 读取剪贴板 → {type, fp, text?, img?}；空返回 null。
+ *  v1.5.2：图片优先——Windows 部分来源（Word 内嵌图、资源管理器 Ctrl+C 图片
+ *  文件、部分浏览器）复制图片时会连带文本格式（文件路径/备用文本）入剪贴板，
+ *  先读文本会把图片误收成一串路径。readImage 对纯文本剪贴板返回空、代价极低，
+ *  顺序反转后文本收集不受影响（纯文本时 readImage 为空才走文本分支）。
+ */
 function readClipboard() {
-  const text = clipboard.readText();
-  if (text && text.trim()) {
-    return { type: 'text', text, fp: sha256hex(text) };
-  }
   const img = clipboard.readImage();
   if (img && !img.isEmpty()) {
     const png = img.toPNG();
     return { type: 'image', img, fp: crypto.createHash('sha256').update(png).digest('hex') };
+  }
+  const text = clipboard.readText();
+  if (text && text.trim()) {
+    return { type: 'text', text, fp: sha256hex(text) };
   }
   return null;
 }
@@ -553,8 +558,8 @@ function memoItemView(it) {
   const full = path.join(dir, it.imageHash + '.png');
   return {
     ...it,
-    thumbUrl: fs.existsSync(thumb) ? NodeURL.pathToFileURL(thumb).href : null,
-    fullUrl: fs.existsSync(full) ? NodeURL.pathToFileURL(full).href : null,
+    thumbUrl: fs.existsSync(thumb) ? pathToFileURL(thumb).href : null,
+    fullUrl: fs.existsSync(full) ? pathToFileURL(full).href : null,
   };
 }
 
