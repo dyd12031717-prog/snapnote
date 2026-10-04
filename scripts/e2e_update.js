@@ -30,6 +30,18 @@ function sleep(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0
 
 function fail(msg) {
   console.error('E2E_UPDATE_FAIL: ' + msg);
+  // 失败时转储 PS 更新日志（脚本 catch 块会把 ERROR 写到 workDir/update.log），
+  // CI 日志里直接看到 PS 侧的失败原因——不再需要 runner 上翻临时目录
+  try {
+    const logPath = global.__e2e_workdir && path.join(global.__e2e_workdir, 'update.log');
+    if (logPath && fs.existsSync(logPath)) {
+      console.error('--- update.ps1 log ---');
+      console.error(fs.readFileSync(logPath, 'utf8'));
+      console.error('--- end ---');
+    } else {
+      console.error('(workDir 无 update.log——PS 未及落盘或未执行)');
+    }
+  } catch (e) { /* 诊断转储失败不影响失败结论 */ }
   process.exit(1);
 }
 
@@ -50,6 +62,7 @@ function main() {
   // 校验镜像结果：NEW-MARKER 放不进去，用「旧标记消失 + exe 就位」判定替换完成。
   // zip 同构契约：zip 必须位于独占 workDir（PS 会 Remove -Recurse 整个目录）
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-e2e-'));
+  global.__e2e_workdir = workDir;
   const zipCopy = path.join(workDir, 'update.zip');
   fs.copyFileSync(zipPath, zipCopy);
 
@@ -69,8 +82,9 @@ function main() {
   const launched = u.applyAndRestart();
   if (!launched) fail('applyAndRestart 返回 false——替换进程未启动（v1.4.1 回归）');
 
-  // 轮询等待替换完成（PS：解压 106MB + robocopy 镜像，CI 磁盘一般 <60s）
-  const deadline = Date.now() + 150000;
+  // 轮询等待替换完成（tar 解压 106MB + robocopy 镜像 380MB；v1.4.1 CI 实测
+  // Expand-Archive 慢到顶爆 150s，换 tar 后正常 <60s，留 300s 余量）
+  const deadline = Date.now() + 300000;
   while (Date.now() < deadline) {
     if (!fs.existsSync(oldMarker)) break;
     sleep(1000);

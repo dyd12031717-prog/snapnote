@@ -48,10 +48,16 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
       - name: 打包产物真实冒烟（运行打包后的 exe 自检）
-        run: ./release/win-unpacked/SnapNote.exe --smoke-test
+        # v1.4.1：GUI 子系统 exe 在 pwsh 里不等待直接返回，退出码被吞（历史假绿）。
+        # 必须 Start-Process -Wait -PassThru 取真实 ExitCode。
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath ".\release\win-unpacked\SnapNote.exe" -ArgumentList "--smoke-test" -PassThru -Wait
+          Write-Host "smoke exit code: $($p.ExitCode)"
+          exit $p.ExitCode
         env:
           SNAPNOTE_FAST: '1'
-        timeout-minutes: 3
+        timeout-minutes: 4
 
       - name: 端到端更新自测（真实跑一遍“重启更新”替换链路）
         # v1.4.1：历史上"重启并更新"因生产装配缺配静默失灵，单测曾全绿。

@@ -10,6 +10,7 @@ const {
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 const { Store } = require('./lib/store');
 const { Scheduler } = require('./lib/scheduler');
@@ -43,8 +44,10 @@ let mode = 'docked';            // docked | expanded
 let collapseTimer = null;
 let animTimer = null;
 
-// 冒烟模式使用独立的临时目录（可用 SNAPNOTE_SMOKE_DIR 注入），且每次启动前清空
-const SMOKE_DIR = process.env.SNAPNOTE_SMOKE_DIR || path.join(ROOT, '.tmp-smoke');
+// 冒烟模式使用独立的临时目录（可用 SNAPNOTE_SMOKE_DIR 注入），且每次启动前清空。
+// v1.4.1：默认改用系统临时区——打包态 ROOT 指向 asar 归档（只读），曾致 CI 冒烟
+// 写 tasks.json ENOENT 中断（而步骤退出码又被 GUI 子系统吞掉显示假绿）。
+const SMOKE_DIR = process.env.SNAPNOTE_SMOKE_DIR || path.join(os.tmpdir(), 'snapnote-smoke');
 if (IS_SMOKE) {
   try {
     for (const f of ['tasks.json', 'tasks.json.bak', 'settings.json', 'settings.json.bak']) {

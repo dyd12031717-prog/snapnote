@@ -88,7 +88,11 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
     '  Log \'extract\'',
     '  if (Test-Path -LiteralPath $extract) { Remove-Item -Recurse -Force -LiteralPath $extract }',
     '  New-Item -ItemType Directory -Force -Path $workDir | Out-Null',
-    '  Expand-Archive -LiteralPath $zipPath -DestinationPath $extract -Force',
+    '  New-Item -ItemType Directory -Force -Path $extract | Out-Null',
+    // v1.4.1：Windows 自带 bsdtar 解 zip，比 Expand-Archive 快数倍（CI 实测后者
+    // 对 106MB 包可超 2.5 分钟，曾直接顶爆 e2e 轮询窗口）
+    '  tar -xf $zipPath -C $extract',
+    '  if ($LASTEXITCODE -ne 0) { throw "tar extract failed: $LASTEXITCODE" }',
     '  $src = $extract',
     '  $entries = @(Get-ChildItem -LiteralPath $src)',
     '  if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) { $src = $entries[0].FullName }',

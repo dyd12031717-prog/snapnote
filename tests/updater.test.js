@@ -63,7 +63,7 @@ test('buildUpdateScript：含关键步骤且路径转义', () => {
     zipPath: 'C:\\temp\\update.zip',
     workDir: 'C:\\temp\\w1',
   });
-  assert.match(s, /Expand-Archive/);
+  assert.match(s, /Expand-Archive|tar -xf/);
   assert.match(s, /robocopy "\$src" "\$appDir" \/MIR/); // v1.4.1：路径含空格时参数须整体引用
   assert.match(s, /\/XF "\$exeBase\.exe"/);
   assert.match(s, /Get-Process -Name \$exeBase/);
@@ -173,7 +173,7 @@ test('Updater.applyAndRestart：写脚本并 spawn powershell', () => {
   assert.equal(spawned.opts.detached, true);
   const script = fs.readFileSync(path.join(dir, 'update.ps1'), 'utf8');
   assert.match(script, new RegExp(u.appDir.replace(/\\/g, '\\\\')));
-  assert.match(script, /Expand-Archive/);
+  assert.match(script, /tar -xf \$zipPath -C \$extract/);
 });
 
 test('Updater.applyAndRestart：未下载时返回 false', () => {
