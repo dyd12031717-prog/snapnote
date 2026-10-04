@@ -27,6 +27,19 @@ const FAST = IS_SMOKE || process.env.SNAPNOTE_FAST === '1'; // 测试/演示用�
 if (IS_SMOKE && app.commandLine && app.commandLine.appendSwitch) {
   app.commandLine.appendSwitch('disable-gpu');
 }
+// E2E 全流程自测注入独立 userData（scripts/e2e_full.js）：隔离真实用户数据与
+// 单实例锁；生产环境不设此变量，零影响。
+if (process.env.SNAPNOTE_USER_DATA) {
+  app.setPath('userData', process.env.SNAPNOTE_USER_DATA);
+}
+// E2E 剪贴板写桥（SNAPNOTE_E2E_CLIPBRIDGE 门控）：无头环境里渲染进程的
+// navigator.clipboard 因无用户激活被拒——测试用它模拟"用户复制"动作，
+// 主进程轮询视角下与真实复制不可区分（同一条系统剪贴板）。生产零暴露。
+if (process.env.SNAPNOTE_E2E_CLIPBRIDGE) {
+  app.whenReady().then(() => {
+    ipcMain.on('e2e:write-clipboard', (_e, t) => { clipboard.writeText(String(t)); });
+  }).catch(() => {});
+}
 
 // ---- 布局常量（与 PRD 第四章视觉规格一致） ----
 const HANDLE_W = 34;            // 贴边把手宽

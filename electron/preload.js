@@ -64,4 +64,9 @@ contextBridge.exposeInMainWorld('snapnote', {
   onCaptureDone: (cb) => ipcRenderer.on('capture:done', (_e, d) => cb(d)),
   captureArchive: (categoryId) => ipcRenderer.send('capture:archive', { categoryId }),
   captureIgnore: () => ipcRenderer.send('capture:ignore'),
+
+  // E2E 剪贴板写桥：渲染层无条件暴露（仅自家 file:// 页面加载，无外部内容），
+  // 主进程端由 SNAPNOTE_E2E_CLIPBRIDGE 门控注册 handler——生产环境该消息无人接收。
+  // （沙箱 preload 读不到自定义 env，故门控只能放主进程侧）
+  e2eWriteClipboard: (t) => ipcRenderer.send('e2e:write-clipboard', t),
 });
