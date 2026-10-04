@@ -64,7 +64,7 @@ test('buildUpdateScript：含关键步骤且路径转义', () => {
     workDir: 'C:\\temp\\w1',
   });
   assert.match(s, /Expand-Archive/);
-  assert.match(s, /robocopy \$src \$appDir \/MIR/);
+  assert.match(s, /robocopy "\$src" "\$appDir" \/MIR/); // v1.4.1：路径含空格时参数须整体引用
   assert.match(s, /\/XF "\$exeBase\.exe"/);
   assert.match(s, /Get-Process -Name \$exeBase/);
   assert.match(s, /Start-Process -FilePath \$exe/);
@@ -178,6 +178,24 @@ test('Updater.applyAndRestart：写脚本并 spawn powershell', () => {
 
 test('Updater.applyAndRestart：未下载时返回 false', () => {
   const u = makeUpdater();
+  assert.equal(u.applyAndRestart(), false);
+});
+
+// ------------------------------------------------------------ 装配完备性（v1.4.1 回归）
+// 历史 bug：main.js 构造 Updater 只传了 log，deps.spawn 缺失默认 null →
+// applyAndRestart 恒 false → "重启并更新"点击后无声失灵（不退出、不更新、不报错）。
+// 单测曾全绿，因为 makeUpdater 恒注入 spawn stub——生产装配从未被覆盖。
+test('装配完备性：deps 未传 spawn 时默认注入真实 child_process.spawn', () => {
+  const u = new Updater({
+    owner: 'alice',
+    repo: 'snapnote',
+    currentVersion: '1.0.0',
+    appDir: 'C:\\Apps\\SnapNote',
+    exeBase: 'SnapNote',
+    deps: { log: () => {} }, // 模拟 main.js 的最小注入
+  });
+  assert.equal(typeof u.deps.spawn, 'function', '默认 spawn 应可用（生产缺配防护）');
+  // zipPath 未设置时仍返回 false，但原因不再是"缺 spawn"（spawn 已具备）
   assert.equal(u.applyAndRestart(), false);
 });
 

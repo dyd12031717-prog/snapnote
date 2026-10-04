@@ -291,6 +291,34 @@ test('到点全屏强提醒（v1.4.0）：due → 全屏窗 → 完成/稍后', 
   assert.ok(ready2.tasks.some(t => t.title === '强提醒任务C' && t.done), '完成它应勾掉任务');
 });
 
+test('主进程更新器装配完备性（v1.4.1 回归）：spawn 可用 + 失败可见', async () => {
+  // 历史 bug：main.js 构造 Updater 时 deps 只传了 log → deps.spawn 为 null →
+  // applyAndRestart 静默 false → 用户点「重启并更新」不退出不更新不报错。
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-updass-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron, main } = loadMain(null, userData);
+  const st = electron.__state;
+  await new Promise(r => setImmediate(r));
+
+  // 1) 装配完备：主进程 updater 的 spawn 必须是真实函数（默认注入，不再依赖 main.js 传参）
+  assert.strictEqual(typeof main.__updater.deps.spawn, 'function',
+    '主进程 updater.deps.spawn 应默认可用（生产装配缺配曾致更新失灵）');
+  // 2) exeBase：开发态从 build.productName 兜底（打包态走 process.execPath basename）
+  assert.strictEqual(main.__exeBase, 'SnapNote', 'exeBase 应为 SnapNote');
+
+  // 3) 失败可见性：state=ready 但 zip 缺失 → restart 应转 error 并推送 UI（不再静默）
+  //    （mock 下 UPDATER_ON=false，updatePayload 显示 disabled 属正确语义；
+  //     这里断言的是状态翻转与推送链路本身）
+  main.__updater.state = 'ready';
+  main.__updater.zipPath = null;
+  st.sent.length = 0;
+  await electron.ipcMain._invoke('update:restart');
+  await new Promise(r => setImmediate(r));
+  assert.strictEqual(main.__updater.state, 'error', 'apply 失败应转 error 态（可感知）');
+  const pushes = st.sent.filter(s => s.channel === 'state:push');
+  assert.ok(pushes.length >= 1, '失败时应触发 state:push 同步 UI（含托盘/设置页/头部按钮）');
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。

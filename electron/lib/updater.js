@@ -13,6 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const cp = require('child_process');
 
 const GITHUB_API = 'https://api.github.com';
 const PLACEHOLDER_OWNER = '__REPLACE_ME__';
@@ -92,7 +93,7 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
     '  $entries = @(Get-ChildItem -LiteralPath $src)',
     '  if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) { $src = $entries[0].FullName }',
     '  Log \'mirror files\'',
-    "  robocopy $src $appDir /MIR /XF \"$exeBase.exe\" \"$exeBase.exe.old\" /NFL /NDL /NJH /NJS /NP | Out-Null",
+    "  robocopy \"$src\" \"$appDir\" /MIR /XF \"$exeBase.exe\" \"$exeBase.exe.old\" /NFL /NDL /NJH /NJS /NP | Out-Null",
     '  if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }',
     '  Log \'swap exe\'',
     '  $exe = Join-Path $appDir "$exeBase.exe"',
@@ -152,7 +153,9 @@ class Updater {
     this.currentVersion = o.currentVersion;
     this.appDir = o.appDir;
     this.exeBase = o.exeBase;
-    this.deps = Object.assign({ fetch, spawn: null, log: () => {}, tmpdir: () => os.tmpdir() }, o.deps);
+    // v1.4.1 教训（生产装配缺配导致"重启更新"静默失灵）：spawn 默认给真实的
+    // child_process.spawn——main.js 忘传时不再静默短路；测试仍可注入 stub 覆盖。
+    this.deps = Object.assign({ fetch, spawn: cp.spawn, log: () => {}, tmpdir: () => os.tmpdir() }, o.deps);
     this.state = 'idle';          // idle | has-update | downloading | ready | error
     this.lastCheck = null;        // parseRelease 结果
     this.zipPath = null;          // 已下载的 zip
@@ -194,8 +197,10 @@ class Updater {
   }
 
   /**
-   * 写出 PS 脚本并脱离进程启动，随后调用方应立即退出应用。
-   * @returns {boolean} 是否成功启动更新进程
+   * 写出 update.ps1 并脱离进程启动 PowerShell 执行（等待退出→解压→镜像→换 exe→重启），
+   * 随后调用方应立即退出应用。@returns {boolean} 是否成功启动更新进程。
+   * 契约：zipPath 必须位于独占临时目录（download() 的产物即此形态）——
+   * PS 脚本最后会 Remove-Item -Recurse 整个 workDir（= zip 所在目录）。
    */
   applyAndRestart() {
     if (!this.zipPath) return false;

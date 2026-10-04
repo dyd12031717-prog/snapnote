@@ -59,12 +59,17 @@ scheduler.onChange = pushState; // 每日任务滚动/复活后同步 UI（pushS
 // ============================================================ 自动更新（便携版）
 const pkg = require('../package.json');
 const appDir = app.isPackaged ? path.dirname(process.execPath) : ROOT;
+// v1.4.1：exe 名从自身进程路径推导（打包后 package.json 的 build 字段会被
+// electron-builder 删除，此前靠 build.productName 回落 'SnapNote' 属侥幸巧合）
+const exeBase = app.isPackaged
+  ? path.basename(process.execPath, path.extname(process.execPath))
+  : ((pkg.build && pkg.build.productName) || 'SnapNote');
 const updater = new Updater({
   owner: pkg.repository && pkg.repository.owner,
   repo: pkg.repository && pkg.repository.repo,
   currentVersion: app.getVersion(),
   appDir,
-  exeBase: (pkg.build && pkg.build.productName) || 'SnapNote',
+  exeBase,
   deps: { log: (...a) => console.log('[updater]', ...a) },
 });
 const UPDATER_ON = !IS_SMOKE && updater.enabled;
@@ -158,7 +163,11 @@ async function startDownload() {
 
 function restartToUpdate() {
   if (updater.state !== 'ready') return;
-  if (updater.applyAndRestart()) app.quit();
+  if (updater.applyAndRestart()) { app.quit(); return; }
+  // v1.4.1：替换进程启动失败必须可见——不再静默吞掉（历史 bug 即此处无声失灵）
+  updater.state = 'error';
+  refreshTray();
+  notifyUpdate('重启更新未能启动', '请到 GitHub Releases 手动下载新版本覆盖');
 }
 
 function onUpdaterMenu() {
@@ -670,4 +679,10 @@ if (!app.requestSingleInstanceLock()) {
     if (tray) { tray.destroy(); tray = null; }
     scheduler.stop();
   });
+}
+
+// 测试钩子（v1.4.1 回归防护）：node --test 下暴露更新器装配供完备性断言。
+// 装配缺配曾导致"重启更新"静默失灵（deps.spawn 未注入），生产/冒烟环境不触发。
+if (process.env.NODE_TEST_CONTEXT) {
+  module.exports = { __updater: updater, __exeBase: exeBase };
 }
