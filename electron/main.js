@@ -6,7 +6,7 @@
  */
 const {
   app, BrowserWindow, Tray, Menu, globalShortcut, ipcMain,
-  screen, Notification, nativeImage,
+  screen, Notification, nativeImage, clipboard,
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -15,7 +15,10 @@ const os = require('os');
 const { Store } = require('./lib/store');
 const { Scheduler } = require('./lib/scheduler');
 const { Updater } = require('./lib/updater');
+const { MemoStore, ROOT_CATEGORY_ID, sha256: sha256hex } = require('./lib/memo');
 const TimeFmt = require('./lib/timeparse');
+const crypto = require('crypto');
+const { URL: NodeURL } = require('url');
 
 const IS_SMOKE = process.argv.includes('--smoke-test');
 const FAST = IS_SMOKE || process.env.SNAPNOTE_FAST === '1'; // 测试/演示用：缩短收起与 Toast 延时
@@ -56,6 +59,7 @@ if (IS_SMOKE) {
   } catch (e) { /* 清理失败不阻断 */ }
 }
 const store = new Store(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'));
+const memoStore = new MemoStore(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'));
 const scheduler = new Scheduler(store, onTaskDue);
 scheduler.onChange = pushState; // 每日任务滚动/复活后同步 UI（pushState 为函数声明，提升可用）
 
@@ -235,12 +239,17 @@ function payload() {
     mode,
     hotkeyActive: currentHotkeyOk,
     update: updatePayload(), // v1.3.0：手动检查更新入口
+    memo: { // v1.5.0：便签头部备忘录入口（计数徽章）
+      captureOn: !!store.settings.memoCapture,
+      count: memoStore.counts().all,
+    },
   };
 }
 function pushState() {
   const data = payload();
   if (noteWin && !noteWin.isDestroyed()) noteWin.webContents.send('state:push', data);
   if (settingsWin && !settingsWin.isDestroyed()) settingsWin.webContents.send('state:push', data);
+  if (memoWin && !memoWin.isDestroyed()) memoWin.webContents.send('state:push', data);
 }
 
 // ============================================================ 便签窗口
@@ -393,6 +402,7 @@ function createSettingsWindow() {
 // ============================================================ 全局快捷键
 let currentHotkeyOk = true;
 function applyHotkey(hotkey) {
+  // v1.5.0：统一注册全部全局快捷键（便签主键 + 备忘录收集/打开键，均用户可自定义）
   globalShortcut.unregisterAll();
   currentHotkeyOk = true;
   try {
@@ -401,7 +411,18 @@ function applyHotkey(hotkey) {
     currentHotkeyOk = false;
   }
   if (!globalShortcut.isRegistered(hotkey)) currentHotkeyOk = false;
+  const memoKeys = [
+    [store.settings.memoCaptureHotkey, quickCapture],
+    [store.settings.memoOpenHotkey, createMemoWindow],
+  ];
+  memoHotkeysOk = {};
+  for (const [k, fn] of memoKeys) {
+    let ok = false;
+    try { ok = !!globalShortcut.register(k, fn); } catch (e) { ok = false; }
+    memoHotkeysOk[k] = ok; // 冲突键记录（渲染层提示），不阻断其他键
+  }
 }
+let memoHotkeysOk = {};
 
 // ============================================================ 开机自启
 function applyAutostart(enabled) {
@@ -473,6 +494,225 @@ function closeReminder() {
   if (reminderWin && !reminderWin.isDestroyed()) reminderWin.close();
 }
 
+// ============================================================ 备忘录（v1.5.0）
+// 剪贴板捕获（复制即收集悬浮气泡）+ 备忘录管理窗口 + 快捷收集
+let memoWin = null;
+let captureWin = null;
+let pendingCapture = null;   // 当前气泡对应的待归档内容
+let lastClipFp = null;       // 上次见过的剪贴板指纹（变化才触发气泡）
+let selfCopyUntil = 0;       // memo:copyItem 写剪贴板后的豁免窗（防自己弹自己）
+let clipTimer = null;
+const CLIP_POLL_MS = FAST ? 400 : 800;
+const CAPTURE_W = 396, CAPTURE_H = 232;
+const CAPTURE_COUNTDOWN = 8; // 气泡自动忽略秒数
+
+function memoAssetsDir() {
+  return path.join(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'), 'memo-assets');
+}
+
+/** 图片落盘：原图 PNG + 缩略 JPEG（240px），返回元数据（hash 内容寻址，天然去重） */
+function saveMemoImage(nativeImg) {
+  const png = nativeImg.toPNG();
+  const hash = crypto.createHash('sha256').update(png).digest('hex');
+  const dir = memoAssetsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const full = path.join(dir, hash + '.png');
+  const thumb = path.join(dir, hash + '_t.jpg');
+  if (!fs.existsSync(full)) fs.writeFileSync(full, png);
+  if (!fs.existsSync(thumb)) {
+    try {
+      const t = nativeImg.getSize();
+      const scale = Math.min(1, 240 / Math.max(1, Math.max(t.width, t.height)));
+      const small = scale < 1 ? nativeImg.resize({ width: Math.max(1, Math.round(t.width * scale)) }) : nativeImg;
+      fs.writeFileSync(thumb, small.toJPEG(78));
+    } catch (e) { /* 缩略失败不阻断，详情用原图 */ }
+  }
+  const sz = nativeImg.getSize();
+  return { hash, w: sz.width, h: sz.height, thumbUrl: NodeURL.pathToFileURL(thumb).href };
+}
+
+/** 读取剪贴板 → {type, fp, text?, img?}；空返回 null */
+function readClipboard() {
+  const text = clipboard.readText();
+  if (text && text.trim()) {
+    return { type: 'text', text, fp: sha256hex(text) };
+  }
+  const img = clipboard.readImage();
+  if (img && !img.isEmpty()) {
+    const png = img.toPNG();
+    return { type: 'image', img, fp: crypto.createHash('sha256').update(png).digest('hex') };
+  }
+  return null;
+}
+
+/** 条目（列表/详情）序列化：附加缩略图 URL（file://） */
+function memoItemView(it) {
+  if (it.type !== 'image' || !it.imageHash) return { ...it };
+  const dir = memoAssetsDir();
+  const thumb = path.join(dir, it.imageHash + '_t.jpg');
+  const full = path.join(dir, it.imageHash + '.png');
+  return {
+    ...it,
+    thumbUrl: fs.existsSync(thumb) ? NodeURL.pathToFileURL(thumb).href : null,
+    fullUrl: fs.existsSync(full) ? NodeURL.pathToFileURL(full).href : null,
+  };
+}
+
+function memoStatePayload() {
+  return {
+    categories: memoStore.categoriesFlat(),
+    recentCatIds: memoStore.recentCatIds,
+    counts: memoStore.counts(),
+    settings: {
+      memoCapture: !!store.settings.memoCapture,
+      memoCaptureHotkey: store.settings.memoCaptureHotkey,
+      memoOpenHotkey: store.settings.memoOpenHotkey,
+    },
+  };
+}
+
+/** 悬浮捕获气泡：右下角、无框、置顶、不抢焦点 */
+function showCaptureBubble(pending) {
+  if (captureWin && !captureWin.isDestroyed()) { try { captureWin.destroy(); } catch (e) {} }
+  pendingCapture = pending;
+  const wa = screen.getPrimaryDisplay().workArea;
+  captureWin = new BrowserWindow({
+    x: wa.x + wa.width - CAPTURE_W - 16,
+    y: wa.y + wa.height - CAPTURE_H - 12,
+    width: CAPTURE_W, height: CAPTURE_H,
+    frame: false, resizable: false, movable: false,
+    skipTaskbar: true, focusable: false, alwaysOnTop: true, show: false,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+  });
+  captureWin.loadFile(path.join(ROOT, 'renderer', 'capture.html'));
+  const send = () => {
+    try {
+      captureWin.webContents.send('capture:payload', {
+        type: pending.type,
+        preview: pending.type === 'text'
+          ? String(pending.text).slice(0, 120)
+          : pending.thumbDataURL,
+        categories: memoStore.categoriesFlat(),
+        recentCatIds: memoStore.recentCatIds,
+        countdown: CAPTURE_COUNTDOWN,
+      });
+    } catch (e) { /* ignore */ }
+  };
+  if (captureWin.webContents.isLoading()) captureWin.webContents.once('did-finish-load', send);
+  else send();
+  captureWin.once('ready-to-show', () => { try { captureWin.showInactive(); } catch (e) {} });
+  captureWin.on('closed', () => { captureWin = null; pendingCapture = null; });
+}
+
+/** 图片气泡预览：提前生成小缩略 dataURL（气泡窗口用 dataURL，简单直接） */
+function thumbDataURLFor(nativeImg, maxPx) {
+  try {
+    const t = nativeImg.getSize();
+    const scale = Math.min(1, maxPx / Math.max(1, Math.max(t.width, t.height)));
+    const small = scale < 1 ? nativeImg.resize({ width: Math.max(1, Math.round(t.width * scale)) }) : nativeImg;
+    return 'data:image/jpeg;base64,' + small.toJPEG(70).toString('base64');
+  } catch (e) { return null; }
+}
+
+function onClipboardTick() {
+  try {
+    if (!store.settings.memoCapture) return;
+    if (captureWin && !captureWin.isDestroyed()) return; // 上一条气泡未决，不叠弹
+    const clip = readClipboard();
+    if (!clip || clip.fp === lastClipFp) return;
+    lastClipFp = clip.fp;
+    if (Date.now() < selfCopyUntil) return; // 自己复制的内容不弹
+    if (clip.type === 'text' && clip.text.trim().length < 2) return; // 碎片不打扰
+    if (clip.type === 'image') {
+      const saved = saveMemoImage(clip.img);
+      showCaptureBubble({
+        type: 'image', imageHash: saved.hash, w: saved.w, h: saved.h,
+        thumbDataURL: thumbDataURLFor(clip.img, 180), source: 'clipboard',
+      });
+    } else {
+      showCaptureBubble({ type: 'text', text: clip.text, source: 'clipboard' });
+    }
+  } catch (e) { /* 轮询永不抛出 */ }
+}
+
+function startClipboardWatch() {
+  if (IS_SMOKE) return; // 冒烟环境无剪贴板交互，且不能弹气泡
+  if (clipTimer) return;
+  clipTimer = setInterval(onClipboardTick, CLIP_POLL_MS);
+  if (clipTimer.unref) clipTimer.unref();
+}
+
+/** 快捷键直达收集：当前剪贴板 → 默认分类（最近使用，否则快速收集），无气泡 */
+function quickCapture() {
+  const clip = readClipboard();
+  if (!clip) {
+    if (Notification.isSupported()) new Notification({ title: '备忘录', body: '剪贴板是空的，先复制点内容吧' }).show();
+    return;
+  }
+  lastClipFp = clip.fp; // 收集后同内容不再弹气泡
+  const catId = memoStore.recentCatIds[0] || ROOT_CATEGORY_ID;
+  const cat = memoStore._cat(catId) ? memoStore._cat(catId) : memoStore._cat(ROOT_CATEGORY_ID);
+  const r = addItemFromClip(clip, cat.id);
+  const body = r && r.duplicate
+    ? `内容已存在于「${cat.name}」（10 分钟内收集过）`
+    : `已存入「${cat.name}」`;
+  if (Notification.isSupported()) {
+    const n = new Notification({ title: '备忘录 · 快速收集', body });
+    n.on('click', createMemoWindow);
+    n.show();
+  }
+  if (memoWin && !memoWin.isDestroyed()) pushMemoState();
+}
+
+function addItemFromClip(clip, catId) {
+  const base = {
+    categoryId: catId,
+    source: clip.source || 'clipboard',
+  };
+  if (clip.type === 'image') {
+    const saved = clip.saved || saveMemoImage(clip.img);
+    return memoStore.addItem({ ...base, type: 'image', imageHash: saved.hash, imageW: saved.w, imageH: saved.h });
+  }
+  return memoStore.addItem({ ...base, type: 'text', text: clip.text });
+}
+
+function pushMemoState() {
+  if (memoWin && !memoWin.isDestroyed()) {
+    try { memoWin.webContents.send('state:push', payload()); } catch (e) { /* ignore */ }
+  }
+}
+
+function createMemoWindow() {
+  if (memoWin && !memoWin.isDestroyed()) { memoWin.focus(); return; }
+  const saved = store.settings.memoWinBounds || {};
+  const wa = screen.getPrimaryDisplay().workArea;
+  const w = Math.min(saved.w || 920, wa.width - 60);
+  const h = Math.min(saved.h || 620, wa.height - 60);
+  memoWin = new BrowserWindow({
+    x: saved.x != null ? saved.x : undefined,
+    y: saved.y != null ? saved.y : undefined,
+    width: w, height: h,
+    minWidth: 720, minHeight: 480,
+    title: '磁吸便签 · 备忘录',
+    autoHideMenuBar: true,
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+  });
+  memoWin.loadFile(path.join(ROOT, 'renderer', 'memo.html'));
+  const pushToMemo = () => { try { memoWin.webContents.send('state:push', payload()); } catch (e) { /* ignore */ } };
+  if (memoWin.webContents.isLoading()) memoWin.webContents.once('did-finish-load', pushToMemo);
+  else pushToMemo();
+  const saveBounds = () => {
+    try {
+      const b = memoWin.getBounds();
+      store.settings.memoWinBounds = { x: b.x, y: b.y, w: b.width, h: b.height };
+      store.persistSettings();
+    } catch (e) { /* ignore */ }
+  };
+  memoWin.on('resized', saveBounds);
+  memoWin.on('moved', saveBounds);
+  memoWin.on('closed', () => { memoWin = null; });
+}
+
 // ============================================================ IPC
 function setupIpc() {
   ipcMain.handle('ui:ready', () => payload());
@@ -485,13 +725,91 @@ function setupIpc() {
   ipcMain.handle('tasks:remove', (_e, id) => { const ok = store.remove(id); pushState(); return ok; });
   ipcMain.handle('settings:get', () => ({ ...store.settings }));
   ipcMain.handle('settings:set', (_e, patch) => {
-    const before = store.settings.hotkey;
+    const before = { hotkey: store.settings.hotkey, cap: store.settings.memoCaptureHotkey, open: store.settings.memoOpenHotkey };
     const s = store.updateSettings(patch);
-    if (patch.hotkey && patch.hotkey !== before) applyHotkey(s.hotkey);
+    if ((patch.hotkey && patch.hotkey !== before.hotkey)
+      || (patch.memoCaptureHotkey && patch.memoCaptureHotkey !== before.cap)
+      || (patch.memoOpenHotkey && patch.memoOpenHotkey !== before.open)) {
+      applyHotkey(s.hotkey); // applyHotkey 注册全部全局快捷键（含备忘录两个）
+    }
     if (typeof patch.autostart === 'boolean') applyAutostart(s.autostart);
+    if (tray && tray._rebuild) tray._rebuild(); // 捕获开关等托盘勾选项同步
     pushState();
     return s;
   });
+
+  // ---- v1.5.0 备忘录 ----
+  ipcMain.handle('memo:state', () => memoStatePayload());
+  ipcMain.handle('memo:items', (_e, o) => memoStore.list(o || {}).map(memoItemView));
+  ipcMain.handle('memo:addCategory', (_e, { name, parentId }) => memoStore.addCategory(name, parentId || null));
+  ipcMain.handle('memo:renameCategory', (_e, { id, name }) => memoStore.renameCategory(id, name));
+  ipcMain.handle('memo:moveCategory', (_e, { id, parentId }) => memoStore.moveCategory(id, parentId || null));
+  ipcMain.handle('memo:reorderCategory', (_e, { id, dir }) => memoStore.reorderCategory(id, dir));
+  ipcMain.handle('memo:removeCategory', (_e, { id, deleteItems }) => memoStore.removeCategory(id, !!deleteItems));
+  ipcMain.handle('memo:addItem', (_e, o) => {
+    const r = memoStore.addItem({
+      type: o.type === 'image' ? 'image' : 'text',
+      text: o.type === 'image' ? undefined : String(o.text || ''),
+      categoryId: o.categoryId || null,
+      sensitive: !!o.sensitive,
+      note: o.note || '',
+      source: o.source || 'manual',
+    });
+    pushMemoState();
+    pushState();
+    return r;
+  });
+  ipcMain.handle('memo:updateItem', (_e, { id, patch }) => {
+    const r = memoStore.updateItem(id, patch || {});
+    pushMemoState();
+    return r;
+  });
+  ipcMain.handle('memo:removeItem', (_e, { id }) => {
+    const r = memoStore.removeItem(id);
+    pushMemoState();
+    pushState();
+    return r;
+  });
+  ipcMain.handle('memo:moveItem', (_e, { id, categoryId }) => {
+    const r = memoStore.moveItem(id, categoryId || null);
+    pushMemoState();
+    return r;
+  });
+  ipcMain.handle('memo:copyItem', async (_e, { id }) => {
+    const it = memoStore.item(id);
+    if (!it) return { ok: false };
+    try {
+      if (it.type === 'image') {
+        const full = path.join(memoAssetsDir(), it.imageHash + '.png');
+        clipboard.writeImage(nativeImage.createFromBuffer(fs.readFileSync(full)));
+      } else {
+        clipboard.writeText(it.text || '');
+      }
+      // 豁免自身：轮询侧读回同一内容并记指纹，避免气泡弹自己
+      const clip = readClipboard();
+      if (clip) lastClipFp = clip.fp;
+      selfCopyUntil = Date.now() + 3000;
+      return { ok: true };
+    } catch (e) { return { ok: false }; }
+  });
+  ipcMain.on('memo:open', createMemoWindow);
+  // 捕获气泡
+  ipcMain.on('capture:archive', (_e, { categoryId }) => {
+    if (!pendingCapture) return;
+    const catId = memoStore._cat(categoryId) ? categoryId : (pendingCapture.categoryId || ROOT_CATEGORY_ID);
+    const r = addItemFromClip(pendingCapture, catId);
+    memoStore.touchCategory(catId);
+    const cat = memoStore._cat(catId);
+    try {
+      captureWin && captureWin.webContents.send('capture:done', {
+        catName: cat ? cat.name : '快速收集',
+        duplicate: !!(r && r.duplicate),
+      });
+    } catch (e) { /* ignore */ }
+    pushMemoState();
+    pushState();
+  });
+  ipcMain.on('capture:ignore', () => { try { captureWin && captureWin.destroy(); } catch (e) {} });
 
   // v1.3.0 手动检查更新（设置页「软件更新」区 / 便签头部按钮）
   ipcMain.handle('update:check', async () => {
@@ -531,6 +849,16 @@ function createTray() {
     tray.setContextMenu(Menu.buildFromTemplate([
       ...updaterMenuTemplate(),
       { label: '打开便签', click: expand },
+      { label: '备忘录', click: createMemoWindow },
+      {
+        label: '剪贴板捕获',
+        type: 'checkbox',
+        checked: !!store.settings.memoCapture,
+        click: (item) => {
+          store.updateSettings({ memoCapture: item.checked });
+          pushState();
+        },
+      },
       { label: '设置…', click: createSettingsWindow },
       { type: 'separator' },
       {
@@ -568,6 +896,12 @@ async function runSmoke() {
   store.add('冒烟任务A', new Date(Date.now() + 5000).toISOString());
   store.add('冒烟任务B', null);
   ok(store.tasks.length === 2, '任务写入');
+
+  // v1.5.0：备忘录数据层就绪 + IPC 通道可用（渲染窗口自检由 memo:state 拉取验证）
+  ok(memoStore._cat(ROOT_CATEGORY_ID) && memoStore.categories.length >= 4, '备忘录分类树就绪');
+  const memoItem = memoStore.addItem({ type: 'text', text: '冒烟备忘条目', categoryId: ROOT_CATEGORY_ID, source: 'manual' });
+  ok(memoItem && memoStore.list({ categoryId: 'cat-root' }).length === 1, '备忘录条目写入');
+  ok(memoStore.removeItem(memoItem.id) && memoStore.items.length === 0, '备忘录条目清理');
 
   expand();
   await wait(MAGNET_MS + 250);
@@ -645,6 +979,7 @@ if (!app.requestSingleInstanceLock()) {
     applyAutostart(store.settings.autostart);
     setupIpc();
     createTray();
+    startClipboardWatch(); // v1.5.0：剪贴板捕获（复制即收集）
     scheduler.start(FAST ? 300 : 20000); // FAST（测试/冒烟）下 300ms 一拍，便于驱动到点链路
     startWindowGuard(); // v1.2.1：窗口 bounds 与 mode 漂移自愈
 

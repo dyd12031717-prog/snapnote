@@ -80,11 +80,16 @@ test('listToday 只统计今天到期且未完成', () => {
 test('settings 默认值与白名单合并', () => {
   const s = tmpStore();
   assert.deepStrictEqual(Object.keys(DEFAULT_SETTINGS).sort(),
-    ['autostart', 'collapseDelay', 'hotkey', 'sound', 'startupToast'].sort());
+    ['autostart', 'collapseDelay', 'hotkey', 'memoCapture', 'memoCaptureHotkey',
+      'memoOpenHotkey', 'sound', 'startupToast'].sort());
   const out = s.updateSettings({ hotkey: 'Ctrl+Shift+K', collapseDelay: 999, hack: true });
   assert.strictEqual(out.hotkey, 'Ctrl+Shift+K');
   assert.strictEqual(out.collapseDelay, 600); // 上限截断
   assert.strictEqual(out.hack, undefined);    // 未知键忽略
+  // v1.5.0 备忘录键：布尔 / 快捷键串
+  assert.strictEqual(s.updateSettings({ memoCapture: false }).memoCapture, false);
+  assert.strictEqual(s.updateSettings({ memoCaptureHotkey: 'Ctrl+Alt+Q' }).memoCaptureHotkey, 'Ctrl+Alt+Q');
+  assert.strictEqual(s.updateSettings({ memoOpenHotkey: '' }).memoOpenHotkey, 'Ctrl+Shift+O'); // 空回默认
 });
 
 test('写入产生 .bak 副本，主文件损坏时自动回退', () => {

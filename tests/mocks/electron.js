@@ -102,6 +102,13 @@ module.exports = {
   },
   ipcMain: new IpcMain(),
   screen: { getPrimaryDisplay() { return { workArea: { x: 0, y: 0, width: 1600, height: 900 } }; } },
-  nativeImage: { createFromPath: () => ({}) },
+  nativeImage: { createFromPath: () => ({}), createFromBuffer: () => ({}) },
+  // v1.5.0 剪贴板 mock：测试通过 state.clipText / state.clipImage 注入内容
+  clipboard: {
+    readText: () => state.clipText || '',
+    writeText: (t) => { state.clipWritten = t; },
+    readImage: () => state.clipImage || { isEmpty: () => true },
+    writeImage: () => {},
+  },
   __state: state,
 };

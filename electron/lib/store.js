@@ -16,6 +16,10 @@ const DEFAULT_SETTINGS = {
   sound: true,            // 到点提醒提示音
   collapseDelay: 30,      // 失焦后自动磁收回边缘的秒数
   startupToast: true,     // 开机今日任务提醒卡片
+  // —— v1.5.0 备忘录 ——
+  memoCapture: true,      // 剪贴板捕获（复制即收集悬浮气泡）
+  memoCaptureHotkey: 'Ctrl+Shift+M', // 快速收集当前剪贴板（不弹气泡，直达默认分类）
+  memoOpenHotkey: 'Ctrl+Shift+O',    // 打开备忘录管理窗口
 };
 
 function newId() {
@@ -195,7 +199,7 @@ class Store {
       let v = patch[k];
       if (k === 'collapseDelay') {
         v = Math.max(5, Math.min(600, Number(v) || DEFAULT_SETTINGS[k]));
-      } else if (k === 'hotkey') {
+      } else if (k === 'hotkey' || k === 'memoCaptureHotkey' || k === 'memoOpenHotkey') {
         v = String(v || '').trim() || DEFAULT_SETTINGS[k];
       } else {
         v = typeof v === 'boolean' ? v : DEFAULT_SETTINGS[k];

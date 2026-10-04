@@ -43,4 +43,25 @@ contextBridge.exposeInMainWorld('snapnote', {
 
   // Toast
   toastClick: () => ipcRenderer.send('toast:click'),
+
+  // 备忘录（v1.5.0）
+  memoOpen: () => ipcRenderer.send('memo:open'),
+  memoState: () => ipcRenderer.invoke('memo:state'),
+  memoItems: (o) => ipcRenderer.invoke('memo:items', o),
+  memoAddCategory: (name, parentId) => ipcRenderer.invoke('memo:addCategory', { name, parentId }),
+  memoRenameCategory: (id, name) => ipcRenderer.invoke('memo:renameCategory', { id, name }),
+  memoMoveCategory: (id, parentId) => ipcRenderer.invoke('memo:moveCategory', { id, parentId }),
+  memoReorderCategory: (id, dir) => ipcRenderer.invoke('memo:reorderCategory', { id, dir }),
+  memoRemoveCategory: (id, deleteItems) => ipcRenderer.invoke('memo:removeCategory', { id, deleteItems }),
+  memoAddItem: (o) => ipcRenderer.invoke('memo:addItem', o),
+  memoUpdateItem: (id, patch) => ipcRenderer.invoke('memo:updateItem', { id, patch }),
+  memoRemoveItem: (id) => ipcRenderer.invoke('memo:removeItem', { id }),
+  memoMoveItem: (id, categoryId) => ipcRenderer.invoke('memo:moveItem', { id, categoryId }),
+  memoCopyItem: (id) => ipcRenderer.invoke('memo:copyItem', { id }),
+
+  // 捕获气泡（v1.5.0）
+  onCapturePayload: (cb) => ipcRenderer.on('capture:payload', (_e, d) => cb(d)),
+  onCaptureDone: (cb) => ipcRenderer.on('capture:done', (_e, d) => cb(d)),
+  captureArchive: (categoryId) => ipcRenderer.send('capture:archive', { categoryId }),
+  captureIgnore: () => ipcRenderer.send('capture:ignore'),
 });

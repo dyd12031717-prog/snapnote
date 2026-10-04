@@ -319,6 +319,69 @@ test('主进程更新器装配完备性（v1.4.1 回归）：spawn 可用 + 失�
   assert.ok(pushes.length >= 1, '失败时应触发 state:push 同步 UI（含托盘/设置页/头部按钮）');
 });
 
+test('备忘录 v1.5.0：IPC CRUD 全链路 + 多快捷键注册 + 捕获豁免', async () => {
+  const userData = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-memo-'));
+  process.env.SNAPNOTE_FAST = '1';
+  const { electron, main } = loadMain(null, userData);
+  const st = electron.__state;
+  await new Promise(r => setImmediate(r));
+  const { ipcMain } = electron;
+
+  // 1) 状态载荷：默认分类树（含内置「快速收集」）与设置键
+  const ms = await ipcMain._invoke('memo:state');
+  assert.ok(ms.categories.length >= 4, '默认分类树');
+  assert.ok(ms.categories.some(c => c.name === '快速收集' && c.locked), '内置根分类');
+  assert.equal(ms.settings.memoCaptureHotkey, 'Ctrl+Shift+M');
+
+  // 2) 分类 → 条目 → 列表/搜索 全链路
+  const cat = await ipcMain._invoke('memo:addCategory', { name: '测试集', parentId: null });
+  assert.ok(cat && cat.id, '新建分类');
+  const sub = await ipcMain._invoke('memo:addCategory', { name: '子集', parentId: cat.id });
+  assert.ok(sub.id, '二级分类');
+  const it = await ipcMain._invoke('memo:addItem',
+    { type: 'text', text: '账号 abc@example', categoryId: sub.id, sensitive: true });
+  assert.ok(it.id, '新建条目');
+  let items = await ipcMain._invoke('memo:items', { categoryId: cat.id, q: '' });
+  assert.equal(items.length, 1, '父分类列表含子孙条目');
+  assert.equal(items[0].sensitive, true);
+  items = await ipcMain._invoke('memo:items', { categoryId: null, q: '' });
+  assert.equal(items.length, 0, '未分类视图不串');
+
+  // 3) 敏感切换 / 移动 / 删除
+  await ipcMain._invoke('memo:updateItem', { id: it.id, patch: { sensitive: false } });
+  await ipcMain._invoke('memo:moveItem', { id: it.id, categoryId: null });
+  items = await ipcMain._invoke('memo:items', { categoryId: null, q: '' });
+  assert.equal(items.length, 1);
+  assert.equal(items[0].sensitive, false);
+  await ipcMain._invoke('memo:removeItem', { id: it.id });
+  items = await ipcMain._invoke('memo:items', { categoryId: null, q: '' });
+  assert.equal(items.length, 0);
+
+  // 4) 快捷键：主便签键 + 备忘录两键共三个全局注册
+  assert.ok(st.hotkeys.size >= 3, '三个全局快捷键均注册');
+  assert.ok(st.hotkeys.has('Ctrl+Shift+M') && st.hotkeys.has('Ctrl+Shift+O'), '备忘录默认键位');
+  // 换键 → 重新注册生效
+  await ipcMain._invoke('settings:set', { memoCaptureHotkey: 'Ctrl+Alt+K' });
+  assert.ok(st.hotkeys.has('Ctrl+Alt+K') && !st.hotkeys.has('Ctrl+Shift+M'), '收集键改键生效');
+
+  // 5) 快捷收集：注入剪贴板文本 → quickCapture 走默认分类（快速收集）
+  st.clipText = '快捷键收集的内容';
+  st.clipImage = null;
+  st.hotkeys.get('Ctrl+Alt+K')(); // 模拟按下收集键
+  await new Promise(r => setImmediate(r));
+  items = await ipcMain._invoke('memo:items', { categoryId: 'cat-root', q: '' });
+  assert.equal(items.length, 1, '快捷收集落入快速收集');
+  assert.equal(items[0].text, '快捷键收集的内容');
+
+  // 6) 复制条目回剪贴板（豁免自捕获）
+  await ipcMain._invoke('memo:copyItem', { id: items[0].id });
+  assert.equal(st.clipWritten, '快捷键收集的内容', 'copyItem 写剪贴板');
+
+  // 7) payload 携带 memo 计数（便签头部徽章）
+  const p = await ipcMain._invoke('ui:ready');
+  assert.ok(p.memo && p.memo.count === 1 && p.memo.captureOn === true, 'payload.memo 徽章数据');
+});
+
 test('回归：打包态 package.json（无 build/repository 字段）不崩', async () => {
   // electron-builder 打包时会删除 build 等字段（ignoredPackageMetadataProperties），
   // 历史 bug：v1.1.0 正式版 main.js 直读 pkg.build.productName → 启动即 TypeError 崩溃。

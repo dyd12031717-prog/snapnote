@@ -1,7 +1,7 @@
 {
   "name": "snapnote",
   "productName": "磁吸便签 SnapNote",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "贴在屏幕右缘的轻量任务便签：开机提醒今日任务，快捷键随叫随到，用完自动磁吸回边缘",
   "author": "SnapNote 项目组",
   "license": "MIT",
@@ -13,7 +13,7 @@
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test tests/store.test.js tests/timeparse.test.js tests/scheduler.test.js tests/main.test.js tests/updater.test.js",
+    "test": "node --test tests/store.test.js tests/timeparse.test.js tests/scheduler.test.js tests/main.test.js tests/updater.test.js tests/memo.test.js",
     "check": "node electron/scripts/check.js",
     "smoke": "electron . --smoke-test",
     "dist": "electron-builder --win nsis portable"

@@ -27,11 +27,11 @@
   .row .col { max-width: 60%; text-align: left; }
   .ctrl { text-align: right; }
   input[type=checkbox] { width: 18px; height: 18px; accent-color: #F39C12; cursor: pointer; }
-  #hotkeyInput {
+  #hotkeyInput, .hkinput {
     width: 150px; height: 30px; text-align: center;
     border: 1.5px solid #F0C64F; border-radius: 8px; outline: none;
     background: #FFF9E8; font-size: 13px; font-weight: 700; cursor: pointer; }
-  #hotkeyInput.rec { border-color: #F39C12; background: #FFEFD2; }
+  #hotkeyInput.rec, .hkinput.rec { border-color: #F39C12; background: #FFEFD2; }
   #delayInput { width: 80px; height: 30px; text-align: center;
     border: 1.5px solid #F0C64F; border-radius: 8px; outline: none;
     background: #FFF9E8; font-size: 13px; }
@@ -82,6 +82,21 @@
       <div class="ctrl"><input id="delayInput" type="number" min="5" max="600" value="30"></div>
     </div>
     <div class="row">
+      <div class="col"><div class="label">备忘录 · 剪贴板捕获</div>
+        <div class="hint">任何软件里复制文字/图片，右下角气泡问你是否归档</div></div>
+      <div class="ctrl"><input type="checkbox" id="memoCapture" checked></div>
+    </div>
+    <div class="row">
+      <div class="col"><div class="label">备忘录 · 快速收集键</div>
+        <div class="hint">把剪贴板内容直接收进最近使用的分类（不弹气泡）</div></div>
+      <div class="ctrl"><input id="memoCapKeyInput" class="hkinput" readonly value="Ctrl+Shift+M"></div>
+    </div>
+    <div class="row">
+      <div class="col"><div class="label">备忘录 · 打开备忘录键</div>
+        <div class="hint">随时唤出备忘录管理窗口</div></div>
+      <div class="ctrl"><input id="memoOpenKeyInput" class="hkinput" readonly value="Ctrl+Shift+O"></div>
+    </div>
+    <div class="row">
       <div class="col"><div class="label">软件更新</div>
         <div class="hint" id="updateHint">检查 GitHub 上的最新版本</div></div>
       <div class="ctrl"><button class="btn btn-plain btn-upd" id="btnCheckUpdate">检查更新</button></div>
@@ -99,11 +114,15 @@
     const api = window.snapnote || window.__SNAPNOTE_MOCK__;
     const $ = (id) => document.getElementById(id);
     const hotkeyInput = $('hotkeyInput');
-    let settings = { hotkey: 'Ctrl+Alt+N', autostart: true, startupToast: true, sound: true, collapseDelay: 30 };
-    let recording = false;
+    let settings = { hotkey: 'Ctrl+Alt+N', autostart: true, startupToast: true, sound: true, collapseDelay: 30,
+      memoCapture: true, memoCaptureHotkey: 'Ctrl+Shift+M', memoOpenHotkey: 'Ctrl+Shift+O' };
+    let recording = null; // v1.5.0：通用快捷键录制（主便签键 + 备忘录两键）
 
     function fill(s) { settings = Object.assign(settings, s || {});
       hotkeyInput.value = settings.hotkey;
+      $('memoCapKeyInput').value = settings.memoCaptureHotkey;
+      $('memoOpenKeyInput').value = settings.memoOpenHotkey;
+      $('memoCapture').checked = !!settings.memoCapture;
       $('autostart').checked = !!settings.autostart;
       $('startupToast').checked = !!settings.startupToast;
       $('sound').checked = !!settings.sound;
@@ -111,26 +130,37 @@
     function say(msg, err) { const st = $('status');
       st.textContent = msg; st.classList.toggle('err', !!err); }
 
-    // 快捷键录制
-    hotkeyInput.addEventListener('click', () => {
-      recording = true; hotkeyInput.classList.add('rec'); hotkeyInput.value = '请按下组合键…';
-    });
+    // 快捷键录制（通用：input 绑定 settings 键名）
+    function bindHotkeyInput(inputEl, settingsKey) {
+      inputEl.addEventListener('click', () => {
+        recording = { el: inputEl, key: settingsKey };
+        inputEl.classList.add('rec'); inputEl.value = '请按下组合键…';
+      });
+    }
+    bindHotkeyInput(hotkeyInput, 'hotkey');
+    bindHotkeyInput($('memoCapKeyInput'), 'memoCaptureHotkey');
+    bindHotkeyInput($('memoOpenKeyInput'), 'memoOpenHotkey');
     document.addEventListener('keydown', (e) => {
       if (!recording) return;
       e.preventDefault(); e.stopPropagation();
       const key = e.key;
       if (['Control', 'Alt', 'Shift', 'Meta'].includes(key)) return; // 等待主键
-      if (key === 'Escape') { recording = false; hotkeyInput.classList.remove('rec');
-        hotkeyInput.value = settings.hotkey; return; }
+      if (key === 'Escape') { recording.el.classList.remove('rec');
+        recording.el.value = settings[recording.key]; recording = null; return; }
       const mods = [];
       if (e.ctrlKey) mods.push('Ctrl');
       if (e.altKey) mods.push('Alt');
       if (e.shiftKey) mods.push('Shift');
       if (mods.length === 0 && key.length > 1) { say('请加上 Ctrl / Alt / Shift 修饰键', true); return; }
       const k = key.length === 1 ? key.toUpperCase() : key;
-      settings.hotkey = mods.concat(k).join('+');
-      hotkeyInput.value = settings.hotkey;
-      recording = false; hotkeyInput.classList.remove('rec');
+      const combo = mods.concat(k).join('+');
+      // 三个键位互斥检测
+      const others = ['hotkey', 'memoCaptureHotkey', 'memoOpenHotkey'].filter(x => x !== recording.key);
+      if (others.some(x => settings[x] === combo)) { say('与其他快捷键重复：' + combo, true); return; }
+      settings[recording.key] = combo;
+      recording.el.value = combo;
+      recording.el.classList.remove('rec');
+      recording = null;
       say('记得点“保存”生效');
     });
 
@@ -139,18 +169,23 @@
       settings.startupToast = $('startupToast').checked;
       settings.sound = $('sound').checked;
       settings.collapseDelay = Number($('delayInput').value) || 30;
+      settings.memoCapture = $('memoCapture').checked;
       if (api && api.setSettings) {
         const s = await api.setSettings({
           hotkey: settings.hotkey, autostart: settings.autostart,
           startupToast: settings.startupToast, sound: settings.sound,
           collapseDelay: settings.collapseDelay,
+          memoCapture: settings.memoCapture,
+          memoCaptureHotkey: settings.memoCaptureHotkey,
+          memoOpenHotkey: settings.memoOpenHotkey,
         });
         fill(s);
         say(s.hotkeyActive === false ? '快捷键可能被占用，请换一组' : '已保存并生效');
       } else say('已保存（本地）');
     });
     $('reset').addEventListener('click', () => {
-      fill({ hotkey: 'Ctrl+Alt+N', autostart: true, startupToast: true, sound: true, collapseDelay: 30 });
+      fill({ hotkey: 'Ctrl+Alt+N', autostart: true, startupToast: true, sound: true, collapseDelay: 30,
+        memoCapture: true, memoCaptureHotkey: 'Ctrl+Shift+M', memoOpenHotkey: 'Ctrl+Shift+O' });
       say('已恢复默认值，点“保存”生效');
     });
 

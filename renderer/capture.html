@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:">
+<title>捕获</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden;
+    font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif; color: #4A3000;
+    background: #2B2317; border-radius: 12px; }
+  .card { width: 100%; height: 100%; display: flex; flex-direction: column;
+    background: linear-gradient(165deg, #FFFCF5, #F8F2E4); border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(20,12,0,.4); overflow: hidden; }
+  .bar { height: 3px; background: rgba(74,48,0,.12); }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #F5A623, #E8930C);
+    transition: width 1s linear; }
+  .head { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #7CB342; box-shadow: 0 0 6px #7CB34288; }
+  .head .t { font-size: 13px; font-weight: 600; color: #6B4E1E; letter-spacing: .5px; }
+  .head .hint { margin-left: auto; font-size: 11px; color: #A08650; }
+  .preview { margin: 0 14px; padding: 10px 12px; background: #FFFFFF;
+    border: 1px solid #EFE4CC; border-radius: 10px; flex: 0 0 auto; min-height: 64px;
+    display: flex; align-items: center; justify-content: center; }
+  .preview.txt { font-size: 13px; line-height: 1.55; color: #4A3000; max-height: 84px; overflow: hidden;
+    display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+    text-align: left; justify-content: flex-start; white-space: pre-wrap; word-break: break-all; }
+  .preview img { max-width: 100%; max-height: 82px; border-radius: 6px; object-fit: contain; }
+  .chips { display: flex; gap: 6px; padding: 10px 14px 0; flex-wrap: wrap; }
+  .chip { font-size: 11px; padding: 4px 10px; border-radius: 999px; background: #F5EDDA;
+    color: #6B4E1E; border: 1px solid #E8DBBB; cursor: pointer; max-width: 100px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .chip:hover { background: #F2DFAD; }
+  .sel { display: flex; align-items: center; gap: 8px; padding: 10px 14px 0; }
+  select { flex: 1; height: 30px; font-size: 12px; color: #4A3000; background: #FFFFFF;
+    border: 1px solid #E5D9BC; border-radius: 8px; padding: 0 8px; outline: none; }
+  .acts { display: flex; gap: 8px; padding: 12px 14px; margin-top: auto; }
+  .btn { flex: 1; height: 34px; border: none; border-radius: 9px; font-size: 13px;
+    font-weight: 600; cursor: pointer; font-family: inherit; }
+  .btn.main { background: linear-gradient(180deg, #F6B93B, #E8930C); color: #3D2800;
+    box-shadow: 0 2px 8px rgba(232,147,12,.35); }
+  .btn.main:hover { filter: brightness(1.04); }
+  .btn.ghost { flex: 0 0 76px; background: transparent; color: #A08650;
+    border: 1px solid #E2D5B5; }
+  .btn.ghost:hover { background: #F5EDDA; }
+  .done { flex: 1; height: 34px; border-radius: 9px; background: #42934A; color: #fff;
+    font-size: 13px; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 6px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="bar"><i id="progress"></i></div>
+  <div class="head">
+    <span class="dot"></span>
+    <span class="t">已捕获 · 归档到备忘录？</span>
+    <span class="hint" id="secs"></span>
+  </div>
+  <div class="preview txt" id="preview"></div>
+  <div class="chips" id="chips"></div>
+  <div class="sel"><select id="cat"></select></div>
+  <div class="acts" id="acts">
+    <button class="btn main" id="ok">归档到备忘录</button>
+    <button class="btn ghost" id="no">忽略</button>
+  </div>
+</div>
+<script>
+(() => {
+  'use strict';
+  const api = window.snapnote;
+  const $ = (id) => document.getElementById(id);
+  let state = { countdown: 8, timer: null, archived: false, recentCatIds: [] };
+  let selectedCat = null;
+
+  function setCountdown(n) {
+    state.countdown = n;
+    $('secs').textContent = n + ' 秒后自动忽略';
+    $('progress').style.width = (n / 8 * 100) + '%';
+  }
+
+  function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
+
+  function buildOptions(categories, recentCatIds) {
+    const sel = $('cat');
+    sel.innerHTML = '';
+    const groups = new Map();
+    for (const c of categories) {
+      const pad = '\u00A0\u00A0'.repeat(Math.min(c.depth, 4));
+      const label = (c.depth > 0 ? '└ ' : '') + c.name + (c.depth > 0 ? '' : '');
+      const opt = document.createElement('option');
+      opt.value = c.id; opt.textContent = pad + label;
+      sel.appendChild(opt);
+    }
+    if (recentCatIds && recentCatIds.length) selectedCat = recentCatIds[0];
+    const fallback = categories.find(c => c.locked);
+    if (selectedCat == null && fallback) selectedCat = fallback.id;
+    if (selectedCat) sel.value = selectedCat;
+    const chips = $('chips');
+    chips.innerHTML = '';
+    for (const id of (recentCatIds || []).slice(0, 3)) {
+      const c = categories.find(x => x.id === id);
+      if (!c) continue;
+      const el = document.createElement('span');
+      el.className = 'chip'; el.textContent = c.name; el.title = c.name;
+      el.onclick = () => { selectedCat = id; sel.value = id; };
+      chips.appendChild(el);
+    }
+  }
+
+  api.onCapturePayload((d) => {
+    const pv = $('preview');
+    if (d.type === 'image') {
+      pv.className = 'preview';
+      pv.innerHTML = d.preview ? '<img src="' + d.preview + '">' : '[图片]';
+    } else {
+      pv.className = 'preview txt';
+      pv.textContent = d.preview || '';
+    }
+    buildOptions(d.categories || [], d.recentCatIds || []);
+    const total = d.countdown || 8;
+    setCountdown(total);
+    state.archived = false;
+    stopTimer();
+    state.timer = setInterval(() => {
+      setCountdown(Math.max(0, state.countdown - 1));
+      if (state.countdown <= 0) { stopTimer(); api.captureIgnore(); }
+    }, 1000);
+  });
+
+  $('cat').onchange = (e) => { selectedCat = e.target.value; };
+
+  $('ok').onclick = () => {
+    if (state.archived) return;
+    api.captureArchive(selectedCat);
+  };
+  $('no').onclick = () => { stopTimer(); api.captureIgnore(); };
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { stopTimer(); api.captureIgnore(); }
+    if (e.key === 'Enter') { $('ok').click(); }
+  });
+
+  api.onCaptureDone((d) => {
+    state.archived = true;
+    stopTimer();
+    $('progress').style.width = '100%';
+    const msg = d.duplicate ? ('「' + d.catName + '」里已有相同内容') : ('已归档到「' + d.catName + '」');
+    $('acts').innerHTML = '<div class="done">✓ ' + msg.replace(/</g, '&lt;') + '</div>';
+    setTimeout(() => api.captureIgnore(), 1400);
+  });
+})();
+</script>
+</body>
+</html>

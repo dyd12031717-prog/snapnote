@@ -209,7 +209,7 @@
       el.classList.toggle('active', el.dataset.label === label));
   }
 
-  function render() { renderHandle(); renderNote(); renderUpdateBtn(state.update); }
+  function render() { renderHandle(); renderNote(); renderUpdateBtn(state.update); renderMemoBadge(state.memo); }
 
   /** v1.3.0：更新入口按钮——仅存在新版本/下载中/就绪/失败时出现，平时零打扰 */
   function renderUpdateBtn(u) {
@@ -231,6 +231,25 @@
     if (u.state === 'ready') { api.restartUpdate(); return; }
     api.checkUpdate();
   });
+
+  // v1.5.0：备忘录入口（✒ 按钮，有内容时带计数徽章；捕获关闭时变暗提示）
+  const btnMemo = $('#btnMemo');
+  btnMemo.addEventListener('click', () => api.memoOpen());
+  function renderMemoBadge(memo) {
+    if (!memo) return;
+    const n = memo.count || 0;
+    btnMemo.classList.toggle('off', !memo.captureOn);
+    btnMemo.title = memo.captureOn
+      ? ('备忘录（收集箱）· ' + n + ' 条 · 复制即收集已开启')
+      : ('备忘录（收集箱）· ' + n + ' 条 · 剪贴板捕获已关闭');
+    if (n > 0) {
+      btnMemo.textContent = '✒' + (n > 99 ? '99+' : n);
+      btnMemo.classList.add('has');
+    } else {
+      btnMemo.textContent = '✒';
+      btnMemo.classList.remove('has');
+    }
+  }
 
   function push(data) {
     state = data;
