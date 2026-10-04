@@ -100,7 +100,8 @@ async function main() {
   if (fs.existsSync(zipCopy)) console.log('[e2e] warn: workDir 未清理（不影响判定，下次 cleanupStale 兜底）');
 
   // 新 exe 已被拉起 → 收尾杀掉（CI 环境不留常驻进程）
-  try { execSync('taskkill /IM SnapNote.exe /F /T', { stdio: 'ignore' }); } catch (e) { /* 已退则忽略 */ }
+  // timeout: execSync 同步挂起兜底（taskkill 对孤儿进程树偶发不返回）
+  try { execSync('taskkill /IM SnapNote.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* 已退/超时均忽略 */ }
 
   console.log('E2E_UPDATE_OK');
 }

@@ -62,8 +62,9 @@ jobs:
       - name: 端到端更新自测（真实跑一遍“重启更新”替换链路）
         # v1.4.1：历史上"重启并更新"因生产装配缺配静默失灵，单测曾全绿。
         # 此步骤在真实 Windows 上执行完整 PowerShell 替换链（旧目录→镜像→换 exe→拉起新进程）。
+        # 8 分钟余量：tar 解压+robocopy 镜像 380MB 在 CI 磁盘上 1-5 分钟不等。
         run: node scripts/e2e_update.js
-        timeout-minutes: 5
+        timeout-minutes: 8
 
       - name: 发布 GitHub Release
         uses: softprops/action-gh-release@v2
