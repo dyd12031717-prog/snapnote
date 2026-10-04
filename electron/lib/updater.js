@@ -105,7 +105,10 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
     `$workDir = '${psEscape(workDir)}'`,
     "$extract = Join-Path $workDir 'extract'",
     "$logFile = Join-Path $workDir 'update.log'",
+    // v1.5.5：失败痕迹同时写到程序目录（用户直观可见）；temp 里的太隐蔽
+    "$errFile = Join-Path $appDir 'update-error.log'",
     'function Log($m) { Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToString(\'s\')) $m" }',
+    'function LogErr($m) { Log $m; try { Add-Content -LiteralPath $errFile -Value "$((Get-Date).ToString(\'s\')) $m" } catch {} }',
     'try {',
     '  Log \'waiting app exit\'',
     '  $deadline = (Get-Date).AddSeconds(20)',
@@ -117,10 +120,19 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
     '  if (Test-Path -LiteralPath $extract) { Remove-Item -Recurse -Force -LiteralPath $extract }',
     '  New-Item -ItemType Directory -Force -Path $workDir | Out-Null',
     '  New-Item -ItemType Directory -Force -Path $extract | Out-Null',
-    // v1.4.1：Windows 自带 bsdtar 解 zip，比 Expand-Archive 快数倍（CI 实测后者
-    // 对 106MB 包可超 2.5 分钟，曾直接顶爆 e2e 轮询窗口）
-    '  tar -xf $zipPath -C $extract',
-    '  if ($LASTEXITCODE -ne 0) { throw "tar extract failed: $LASTEXITCODE" }',
+    // v1.5.5：绝对路径调 System32 的 bsdtar（支持 zip）。此前直接调 `tar`——
+    // 装了 Git 的机器 PATH 里 GNU tar 抢先被调，而 GNU tar 解不了 zip →
+    // 替换链在第一步即挂（用户真机"点重启无后续"与 CI e2e 失败的头号嫌疑）。
+    // tar 任何失败自动回退 Expand-Archive（慢但稳）——解压永不致命。
+    '  $sysTar = Join-Path $env:SystemRoot "System32\\tar.exe"',
+    '  $tarOk = $false',
+    '  if (Test-Path -LiteralPath $sysTar) {',
+    '    & $sysTar -xf "$zipPath" -C "$extract"',
+    '    if ($LASTEXITCODE -eq 0) { $tarOk = $true } else { Log "sys tar failed rc=$LASTEXITCODE, fallback to Expand-Archive" }',
+    '  }',
+    '  if (-not $tarOk) {',
+    '    Expand-Archive -LiteralPath "$zipPath" -DestinationPath "$extract" -Force',
+    '  }',
     '  $src = $extract',
     '  $entries = @(Get-ChildItem -LiteralPath $src)',
     '  if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) { $src = $entries[0].FullName }',
@@ -131,15 +143,27 @@ function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
     '  $exe = Join-Path $appDir "$exeBase.exe"',
     '  $old = Join-Path $appDir "$exeBase.exe.old"',
     '  if (Test-Path -LiteralPath $old) { Remove-Item -Force -LiteralPath $old -ErrorAction SilentlyContinue }',
-    '  if (Test-Path -LiteralPath $exe) { Move-Item -Force -LiteralPath $exe $old }',
-    '  Copy-Item -Force -LiteralPath (Join-Path $src "$exeBase.exe") $exe',
+    '  if (Test-Path -LiteralPath $exe) { Move-Item -Force -LiteralPath "$exe" "$old" }',
+    '  Copy-Item -Force -LiteralPath (Join-Path $src "$exeBase.exe") "$exe"',
     '  Log \'restart\'',
-    '  Start-Process -FilePath $exe -WorkingDirectory $appDir',
+    '  Start-Process -FilePath "$exe" -WorkingDirectory "$appDir"',
     '  Start-Sleep -Seconds 2',
     '  Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue',
+    '  try { Remove-Item -Force -LiteralPath $errFile -ErrorAction SilentlyContinue } catch {}',
     '  Log \'done\'',
     '} catch {',
-    '  Log "ERROR: $($_.Exception.Message)"',
+    '  LogErr "ERROR: $($_.Exception.Message)"',
+    // v1.5.5 回滚保底：若失败发生在 exe 换名之后（旧 exe 已改名 .old 而新 exe
+    // 未就位），把旧 exe 换回来并拉起——绝不把用户留在"目录里没有 exe"的死局
+    '  try {',
+    '    $exeRb = Join-Path $appDir "$exeBase.exe"',
+    '    $oldRb = Join-Path $appDir "$exeBase.exe.old"',
+    '    if (-not (Test-Path -LiteralPath $exeRb) -and (Test-Path -LiteralPath $oldRb)) {',
+    '      Move-Item -Force -LiteralPath $oldRb $exeRb',
+    '      LogErr \'rolled back exe\'',
+    '    }',
+    '    if (Test-Path -LiteralPath $exeRb) { Start-Process -FilePath "$exeRb" -WorkingDirectory "$appDir" }',
+    '  } catch { LogErr "rollback failed: $($_.Exception.Message)" }',
     '  exit 1',
     '}',
   ].join('\n');

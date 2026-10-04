@@ -1024,6 +1024,18 @@ if (!app.requestSingleInstanceLock()) {
 
     // 自动更新：清理上次更新残留，启动 15 秒后台静默检查一次
     updater.cleanupStale();
+    // v1.5.5：检测上次更新替换失败留痕（PS 脚本 catch 写的 appDir/update-error.log）
+    // ——更新失败不再无声无息；通知一次后清理，避免每次启动都打扰
+    const updateErrFile = path.join(appDir, 'update-error.log');
+    if (app.isPackaged && fs.existsSync(updateErrFile)) {
+      try { fs.unlinkSync(updateErrFile); } catch (e) { /* ignore */ }
+      if (Notification.isSupported()) {
+        new Notification({
+          title: '上次更新未完成',
+          body: '替换阶段出错，已保住当前版本。请从托盘菜单重试更新；若再次失败请截图发给开发者。',
+        }).show();
+      }
+    }
     if (UPDATER_ON) {
       const checkTimer = setTimeout(() => { checkForUpdate(false); }, 15000);
       if (checkTimer.unref) checkTimer.unref();

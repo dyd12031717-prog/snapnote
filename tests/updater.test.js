@@ -129,11 +129,13 @@ test('buildUpdateScript：含关键步骤且路径转义', () => {
     zipPath: 'C:\\temp\\update.zip',
     workDir: 'C:\\temp\\w1',
   });
-  assert.match(s, /Expand-Archive|tar -xf/);
+  assert.match(s, /Expand-Archive/); // v1.5.5：tar 失败兜底保留
+  assert.match(s, /System32\\tar\.exe/); // v1.5.5：系统 tar 绝对路径（防 Git GNU tar 抢 PATH）
   assert.match(s, /robocopy "\$src" "\$appDir" \/MIR/); // v1.4.1：路径含空格时参数须整体引用
   assert.match(s, /\/XF "\$exeBase\.exe"/);
   assert.match(s, /Get-Process -Name \$exeBase/);
-  assert.match(s, /Start-Process -FilePath \$exe/);
+  assert.match(s, /Start-Process -FilePath "\$exe"/);
+  assert.match(s, /update-error\.log/); // v1.5.5：失败留痕写到程序目录
   assert.match(s, /Snap Note''s/); // 单引号 PS 转义
   assert.doesNotMatch(s, /__undefined__/);
 });
@@ -239,7 +241,7 @@ test('Updater.applyAndRestart：写脚本并 spawn powershell', () => {
   assert.equal(spawned.opts.detached, true);
   const script = fs.readFileSync(path.join(dir, 'update.ps1'), 'utf8');
   assert.match(script, new RegExp(u.appDir.replace(/\\/g, '\\\\')));
-  assert.match(script, /tar -xf \$zipPath -C \$extract/);
+  assert.match(script, /System32\\tar\.exe/); // v1.5.5：系统 tar 绝对路径（防 Git GNU tar 抢 PATH）
 });
 
 test('Updater.applyAndRestart：未下载时返回 false', () => {
