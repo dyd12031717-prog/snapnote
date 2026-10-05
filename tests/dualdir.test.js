@@ -31,16 +31,20 @@ test('parseAppDirName：识别与拒绝', () => {
   assert.strictEqual(dualdir.parseAppDirName('app-1'), null);
 });
 
+// 路径断言归一化：分隔符随 OS 的 path.sep 变化（CI=Windows 反斜杠，
+// 本地 Linux 正斜杠），代码行为两者皆正确——断言比较前统一为 '/'。
+const norm = (p) => String(p).replace(/\\/g, '/');
+
 test('deriveAppRoot：Windows 双目录/平铺（生产形态）', () => {
-  assert.strictEqual(dualdir.deriveAppRoot('E:\\project\\SnapNote\\app-1.6.0\\SnapNoteApp.exe'), 'E:/project/SnapNote');
-  assert.strictEqual(dualdir.deriveAppRoot('E:\\project\\SnapNote\\SnapNoteApp.exe'), 'E:/project/SnapNote');
-  assert.strictEqual(dualdir.deriveAppRoot('C:\\SnapNote\\app-1.6.0\\SnapNoteApp.exe'), 'C:/SnapNote');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('E:\\project\\SnapNote\\app-1.6.0\\SnapNoteApp.exe')), 'E:/project/SnapNote');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('E:\\project\\SnapNote\\SnapNoteApp.exe')), 'E:/project/SnapNote');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('C:\\SnapNote\\app-1.6.0\\SnapNoteApp.exe')), 'C:/SnapNote');
 });
 
 test('deriveAppRoot：posix（单测/Linux 形态）与裸文件名', () => {
-  assert.strictEqual(dualdir.deriveAppRoot('/tmp/x/app-1.7.2/SnapNoteApp.exe'), '/tmp/x');
-  assert.strictEqual(dualdir.deriveAppRoot('/tmp/x/SnapNoteApp.exe'), '/tmp/x');
-  assert.strictEqual(dualdir.deriveAppRoot('SnapNoteApp.exe'), '.');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('/tmp/x/app-1.7.2/SnapNoteApp.exe')), '/tmp/x');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('/tmp/x/SnapNoteApp.exe')), '/tmp/x');
+  assert.strictEqual(norm(dualdir.deriveAppRoot('SnapNoteApp.exe')), '.');
 });
 
 test('deriveVersionDir：版本目录名或 null', () => {
