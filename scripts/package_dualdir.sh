@@ -41,7 +41,25 @@ fi
 printf '{"current":"app-%s","previous":null}\n' "${VERSION}" > "${STAGING}/channels.json"
 
 rm -f "${OUT}"
-( cd "${STAGING}" && zip -qr "../$(basename "${OUT}")" . )
+# 跨平台打包（Windows runner 的 Git Bash 无 zip 命令——v1.6.0 CI 实测教训）：
+# zip → 7z（Windows runner 预装）→ PowerShell Compress-Archive（最后兜底）
+( cd "${STAGING}" && {
+  if command -v zip >/dev/null 2>&1; then
+    zip -qr "../$(basename "${OUT}")" .
+  elif command -v 7z >/dev/null 2>&1; then
+    7z a -tzip "../$(basename "${OUT}")" . >/dev/null
+  elif [ -x "/c/Program Files/7-Zip/7z.exe" ]; then
+    "/c/Program Files/7-Zip/7z.exe" a -tzip "../$(basename "${OUT}")" . >/dev/null
+  else
+    pwsh -NoProfile -Command "Compress-Archive -Path * -DestinationPath '../$(basename "${OUT}")' -Force"
+  fi
+} )
+
+# 产物完整性自检（失败必须可见，不留半成品 zip）
+if [ ! -s "${OUT}" ]; then
+  echo "ERROR: 组装 zip 未生成或为空：${OUT}" >&2
+  exit 1
+fi
 
 echo "OK: ${OUT}"
 ls -la "${OUT}"
