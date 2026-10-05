@@ -77,7 +77,7 @@ jobs:
         shell: bash
         run: bash scripts/package_dualdir.sh
 
-      - name: 组装升级包（SnapNoteUpgrader.exe + data.zip，v1.6.3）
+      - name: 组装单文件升级包（SFX 自解压 exe，v1.6.4）
         shell: bash
         run: bash scripts/package_upgrader.sh
 
@@ -109,7 +109,7 @@ jobs:
           files: |
             release/SnapNote-Portable-*-win-x64.zip
             release/SnapNote-Portable-*-win-x64.zip.sha256
-            release/SnapNote-Upgrader-*.zip
+            release/SnapNote-Upgrader-*.exe
           generate_release_notes: true
           fail_on_unmatched_files: true
 
@@ -120,7 +120,7 @@ jobs:
           path: |
             release/SnapNote-Portable-*-win-x64.zip
             release/SnapNote-Portable-*-win-x64.zip.sha256
-            release/SnapNote-Upgrader-*.zip
+            release/SnapNote-Upgrader-*.exe
           retention-days: 3
           if-no-files-found: error
 

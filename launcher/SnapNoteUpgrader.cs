@@ -32,33 +32,87 @@ namespace SnapNoteUpgrader
     static class Program
     {
         static readonly Encoding NoBom = new UTF8Encoding(false); // UTF-8 无 BOM：写 JSON/配置一律用它（Node JSON.parse 对 BOM 敏感）
+        static string _logFile; // %AppData%\SnapNote\logs\upgrader-<日期>.log（v1.6.4：动作留痕）
+
+        /// 升级器自身日志：Main 第一行即初始化（早于一切逻辑——
+        /// 「双击无反应」必须能从此日志判定：进程起没起、死在第几步）
+        static void Log0(string m)
+        {
+            try
+            {
+                if (_logFile == null)
+                {
+                    string dir = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "SnapNote", "logs");
+                    Directory.CreateDirectory(dir);
+                    _logFile = Path.Combine(dir, "upgrader-" + DateTime.Now.ToString("yyyyMMdd") + ".log");
+                }
+                File.AppendAllText(_logFile,
+                    DateTime.Now.ToString("s") + " " + m + Environment.NewLine, NoBom);
+            }
+            catch { /* 日志尽力而为，绝不影响主流程 */ }
+        }
+
         [STAThread]
         static int Main(string[] args)
         {
+            Log0("=== 升级器启动 | OS=" + Environment.OSVersion.VersionString
+                + " | args=" + string.Join(" ", args));
+            // 兜底：任何未捕获异常先落日志再可见（启动即崩也能定位到行）
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
+            {
+                Log0("!!! 未捕获异常：" + (e.ExceptionObject is Exception ? ((Exception)e.ExceptionObject).Message + " @ " + ((Exception)e.ExceptionObject).StackTrace : Convert.ToString(e.ExceptionObject)));
+                try
+                {
+                    MessageBox.Show("升级器遇到错误，日志已保存：\n" + _logFile,
+                        "SnapNote 升级器", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                catch { /* 无 UI 环境尽力 */ }
+            };
+            Application.ThreadException += delegate(object s, System.Threading.ThreadExceptionEventArgs e)
+            {
+                Log0("!!! UI 线程异常：" + e.Exception.Message + " @ " + e.Exception.StackTrace);
+            };
+            try { Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException); }
+            catch { /* 老框架兜底失败忽略 */ }
+
             bool e2e = args.Any(a => a == "--e2e");
             string dirArgRaw = args.FirstOrDefault(a => a.StartsWith("--dir="));
             string dirArg = dirArgRaw == null ? null : dirArgRaw.Substring(6);
             if (e2e)
             {
-                try { return RunUpgrade(dirArg, null); }
-                catch (Exception ex) { Console.Error.WriteLine("UPGRADER_FAIL: " + ex.Message); return 1; }
+                try { return RunUpgrade(dirArg, null, null); }
+                catch (Exception ex) { Log0("UPGRADER_FAIL: " + ex.Message); return 1; }
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new UpgForm(dirArg));
+            Log0("=== 退出 code=" + UpgForm.ExitCode);
             return UpgForm.ExitCode;
         }
 
         // ---------------- 升级主流程（UI 与 e2e 共用） ----------------
-        public static int RunUpgrade(string dirArg, Action<string> log)
+        // askDir：目录手选回调（UI 线程弹 FolderBrowserDialog——worker 是 MTA 线程，
+        // 直接弹对话框会抛 ThreadStateException，必须由 UI 层 Invoke 回主线程；e2e 传 null）
+        public static int RunUpgrade(string dirArg, Action<string> log, Func<string> askDir)
         {
-            Action<string> L = delegate(string m) { if (log != null) log(m); Console.WriteLine(m); };
-            string appRoot = ResolveInstallDir(dirArg, L);
+            Action<string> L = delegate(string m) { if (log != null) log(m); Console.WriteLine(m); Log0(m); };
+            string appRoot = ResolveInstallDir(dirArg, L, askDir);
             if (appRoot == null) { L("✕ 未找到 SnapNote 安装目录"); return 2; }
             L("安装目录：" + appRoot);
 
+            // v1.6.4 SFX：单文件升级包——数据嵌在 exe 尾部，运行时自提取
             string dataZip = Path.Combine(AppDir(), "data.zip");
-            if (!File.Exists(dataZip)) { L("✕ 升级包数据文件缺失：data.zip（须与升级器同目录）"); return 3; }
+            bool fromBundled = false;
+            if (!File.Exists(dataZip))
+            {
+                dataZip = ExtractBundledZip(L);
+                fromBundled = dataZip != null;
+                if (fromBundled) L("升级数据：内置（单文件模式）");
+            }
+            else L("升级数据：同目录 data.zip");
+            if (dataZip == null || !File.Exists(dataZip))
+            { L("✕ 升级数据缺失（exe 未内嵌且同目录无 data.zip——文件损坏或被杀软改动？）"); return 3; }
 
             string logFile = Path.Combine(appRoot, ".update-work", "upgrader-log.txt");
             try { Directory.CreateDirectory(Path.GetDirectoryName(logFile)); } catch { /* 忽略 */ }
@@ -146,6 +200,7 @@ namespace SnapNoteUpgrader
                 });
                 L("✓ 升级完成，已启动 v" + ver);
                 WriteResult("OK v" + ver + " (from " + (old ?? "clean") + ")");
+                if (fromBundled) { try { File.Delete(dataZip); } catch { /* 临时自提取文件 */ } }
                 return 0;
             }
             catch (Exception ex)
@@ -154,6 +209,7 @@ namespace SnapNoteUpgrader
                 L("（旧版本未受影响，可重新打开软件继续使用；"
                   + "本日志已保存：" + logFile + "）");
                 WriteResult("FAIL " + ex.Message);
+                if (fromBundled) { try { File.Delete(dataZip); } catch { /* */ } }
                 return 1;
             }
         }
@@ -161,7 +217,71 @@ namespace SnapNoteUpgrader
         // ---------------- 工具方法 ----------------
         static string AppDir() { return Path.GetDirectoryName(Process.GetCurrentProcess().MainModule.FileName); }
 
-        static string ResolveInstallDir(string dirArg, Action<string> L)
+        /// <summary>
+        /// v1.6.4 SFX 自提取：升级数据 zip 拼接在本 exe 尾部（cat exe + zip）。
+        /// 从自身文件尾部向上找 zip 的 EOCD 记录（PK\x05\x06，注释区最大 65535+22），
+        /// 由 EOCD 的 CD 大小/偏移反推 zip 起点（校验 PK\x03\x04），整段切到临时文件。
+        /// 找不到返回 null（纯 exe 无数据——同伴 data.zip 逻辑的前置）。
+        /// </summary>
+        static string ExtractBundledZip(Action<string> L)
+        {
+            string self;
+            try { self = Process.GetCurrentProcess().MainModule.FileName; }
+            catch { return null; }
+            using (FileStream fs = File.OpenRead(self))
+            {
+                long size = fs.Length;
+                if (size < 200) return null;
+                long window = Math.Min(size, 70000);
+                fs.Seek(size - window, SeekOrigin.Begin);
+                byte[] tail = new byte[window];
+                int got = 0;
+                while (got < window) { int n = fs.Read(tail, got, (int)window - got); if (n <= 0) break; got += n; }
+                if (got < window) return null;
+
+                int eocd = -1;
+                for (int i = (int)window - 22; i >= 0; i--)
+                {
+                    if (tail[i] == 0x50 && tail[i + 1] == 0x4B && tail[i + 2] == 0x05 && tail[i + 3] == 0x06) { eocd = i; break; }
+                }
+                if (eocd < 0) { L("（未检测到内置数据：尾部无 zip EOCD）"); return null; }
+
+                int commentLen = tail[eocd + 20] | (tail[eocd + 21] << 8);
+                uint cdSize = BitConverter.ToUInt32(tail, eocd + 12);
+                uint cdOffset = BitConverter.ToUInt32(tail, eocd + 16);
+                long zipEnd = (size - window) + eocd + 22 + commentLen;
+                long zipStart = (size - window) + eocd - cdSize - cdOffset;
+                if (zipStart < 0 || zipEnd > size) { L("（内置数据区段越界）"); return null; }
+
+                // zip 起点必须是 local file header（PK\x03\x04）
+                fs.Seek(zipStart, SeekOrigin.Begin);
+                byte[] magic = new byte[4];
+                if (fs.Read(magic, 0, 4) != 4
+                    || magic[0] != 0x50 || magic[1] != 0x4B || magic[2] != 0x03 || magic[3] != 0x04)
+                { L("（内置数据起点校验失败）"); return null; }
+
+                string tmpZip = Path.Combine(Path.GetTempPath(),
+                    "snapnote-sfx-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".zip");
+                fs.Seek(zipStart, SeekOrigin.Begin);
+                using (FileStream outFs = File.Create(tmpZip))
+                {
+                    byte[] buf = new byte[1 << 20];
+                    long left = zipEnd - zipStart;
+                    while (left > 0)
+                    {
+                        int n = fs.Read(buf, 0, (int)Math.Min(buf.Length, left));
+                        if (n <= 0) break;
+                        outFs.Write(buf, 0, n);
+                        left -= n;
+                    }
+                }
+                if (new FileInfo(tmpZip).Length != zipEnd - zipStart)
+                { L("（内置数据提取不完整）"); try { File.Delete(tmpZip); } catch { } return null; }
+                return tmpZip;
+            }
+        }
+
+        static string ResolveInstallDir(string dirArg, Action<string> L, Func<string> askDir)
         {
             // 1) 显式参数（e2e/高级用户）
             if (!string.IsNullOrEmpty(dirArg) && File.Exists(Path.Combine(dirArg, "channels.json")))
@@ -174,25 +294,24 @@ namespace SnapNoteUpgrader
                 string p = File.ReadAllText(loc, Encoding.UTF8).Trim();
                 if (File.Exists(Path.Combine(p, "channels.json"))) { L("（位置来自应用自报：" + p + "）"); return p; }
             }
-            // 3) UI 手选一次并记住（记录到 location 文件，下次免选）
-            using (var dlg = new FolderBrowserDialog())
+            // 3) 手选一次并记住（v1.6.4：经 askDir 回 UI 线程弹框——worker 是 MTA，
+            //    此前直接在 worker 弹 FolderBrowserDialog 抛 ThreadStateException）
+            if (askDir == null) return null; // e2e/无 UI：不手选，直接判定失败
+            string picked = askDir();
+            if (picked == null) return null;
+            if (!File.Exists(Path.Combine(picked, "channels.json")))
             {
-                dlg.Description = "选择 SnapNote 的安装目录（包含 SnapNote.exe 和 app-x.y.z 子目录的那个文件夹）";
-                dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog() != DialogResult.OK) return null;
-                if (!File.Exists(Path.Combine(dlg.SelectedPath, "channels.json")))
-                {
-                    MessageBox.Show("所选目录不像 SnapNote 安装目录（未找到 channels.json），升级未执行。",
-                        "SnapNote 升级器", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return null;
-                }
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(loc));
-                    File.WriteAllText(loc, dlg.SelectedPath + Environment.NewLine, NoBom);
-                } catch { /* 记不住不影响本次 */ }
-                return dlg.SelectedPath;
+                MessageBox.Show("所选目录不像 SnapNote 安装目录（未找到 channels.json），升级未执行。",
+                    "SnapNote 升级器", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
             }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(loc));
+                File.WriteAllText(loc, picked + Environment.NewLine, NoBom);
+            }
+            catch { /* 记不住不影响本次 */ }
+            return picked;
         }
 
         static int[] ParseVer(string name)
@@ -310,7 +429,7 @@ namespace SnapNoteUpgrader
 
             _worker = new Thread(() =>
             {
-                ExitCode = Program.RunUpgrade(dirArg, m => AppendLog(m));
+                ExitCode = Program.RunUpgrade(dirArg, m => AppendLog(m), AskDir);
                 Invoke(new Action(() =>
                 {
                     _close.Enabled = true;
@@ -329,6 +448,23 @@ namespace SnapNoteUpgrader
             {
                 _log.AppendText(m + Environment.NewLine);
             }));
+        }
+
+        /// 目录手选（v1.6.4 线程修复）：worker（MTA）不能直接弹 FolderBrowserDialog，
+        /// Invoke 回 UI 主线程（STA）执行；返回 null=取消。
+        string AskDir()
+        {
+            string picked = null;
+            Invoke(new Action(delegate
+            {
+                using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择 SnapNote 的安装目录（包含 SnapNote.exe 和 app-x.y.z 子目录的那个文件夹）";
+                    dlg.ShowNewFolderButton = false;
+                    if (dlg.ShowDialog(this) == DialogResult.OK) picked = dlg.SelectedPath;
+                }
+            }));
+            return picked;
         }
 
         protected override void OnShown(EventArgs e)

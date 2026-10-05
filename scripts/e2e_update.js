@@ -134,19 +134,16 @@ async function main() {
     throw new Error('回滚后 targetExe 未指回旧版');
   }
 
-  // ---- 7) v1.6.3 升级器链（关软件-升级-重启 全自动） ----
-  // 场景：真起一个 SnapNoteApp（升级器必须能杀掉它）→ 跑 SnapNoteUpgrader.exe
-  // --e2e --dir=<install> → 断言：旧进程被杀、新版本就位、指针翻转、软件被重启。
-  const upgZipName = fs.readdirSync(RELEASE).find((f) => /^SnapNote-Upgrader-.*\.zip$/.test(f));
-  if (!upgZipName) throw new Error('release 下找不到升级包 zip（组装流水线回归）');
-  const upgDir = path.join(RELEASE, 'e2e-upgrader');
-  fs.rmSync(upgDir, { recursive: true, force: true });
-  fs.mkdirSync(upgDir, { recursive: true });
-  cp.execSync(`tar -xf "${path.join(RELEASE, upgZipName)}" -C "${upgDir}"`, { timeout: 60000 });
-  const upgExe = path.join(upgDir, 'SnapNoteUpgrader.exe');
-  if (!fs.existsSync(upgExe)) throw new Error('升级包缺 SnapNoteUpgrader.exe');
-  if (!fs.existsSync(path.join(upgDir, 'data.zip'))) throw new Error('升级包缺 data.zip');
-  console.log('[e2e] upgrader =', upgZipName);
+  // ---- 7) v1.6.4 单文件升级器（SFX：数据内嵌 exe 尾部）全链 ----
+  // 场景：真起一个 SnapNoteApp（升级器必须能杀掉它）→ 双击等价：直接跑
+  // SnapNote-Upgrader-<ver>.exe --e2e --dir=<install>（无同伴文件、无解压）
+  // → 断言：SFX 自提取成功、旧进程被杀、新版本就位、指针翻转、软件被重启。
+  const upgExeName = fs.readdirSync(RELEASE).find((f) => /^SnapNote-Upgrader-.*\.exe$/.test(f));
+  if (!upgExeName) throw new Error('release 下找不到单文件升级包 exe（组装流水线回归）');
+  const upgExe = path.join(RELEASE, upgExeName);
+  const upgDir = RELEASE; // 单文件：无需解压，exe 直接跑（同目录无 data.zip 才能证明 SFX）
+  if (fs.existsSync(path.join(RELEASE, 'data.zip'))) throw new Error('出现同伴 data.zip——SFX 单文件语义被破坏');
+  console.log('[e2e] upgrader =', upgExeName, '(SFX 单文件)');
 
   // 回滚态此时 current=OLD_DIR——先翻回新版（模拟用户日常用新版，升级器来升未来的版本）
   dualdir.writeChannelsAtomic(install, { current: NEW_DIR, previous: OLD_DIR });
@@ -176,6 +173,9 @@ async function main() {
   if (chU.previous !== NEW_DIR) throw new Error('升级器应保留旧 current 为 previous');
   if (!fs.existsSync(path.join(install, NEW_DIR, 'SnapNoteApp.exe'))) throw new Error('升级后主程序缺失');
   if (!fs.existsSync(path.join(install, '.update-work', 'upgrader-log.txt'))) throw new Error('升级日志缺失（失败可见铁律）');
+  const appDataLogs = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'SnapNote', 'logs');
+  const upgGlobalLog = fs.readdirSync(appDataLogs).find((f) => /^upgrader-.*\.log$/.test(f));
+  if (!upgGlobalLog) throw new Error('升级器全局日志缺失（v1.6.4 动作留痕）');
 
   // 断言「重启」：升级器拉起了 launcher → SnapNoteApp
   const relaunched = await waitUntil(() => processAlive('SnapNoteApp'), 25000);

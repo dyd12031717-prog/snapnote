@@ -83,6 +83,16 @@ const memoStore = new MemoStore(IS_SMOKE ? SMOKE_DIR : app.getPath('userData'));
 const scheduler = new Scheduler(store, onTaskDue);
 scheduler.onChange = pushState; // 每日任务滚动/复活后同步 UI（pushState 为函数声明，提升可用）
 
+// ============================================================ 动作日志（v1.6.4）
+// 用户需求：任何动作都要留痕（「双击无反应」无从排查的教训）；每周自动清理。
+// 隐私红线：只记动作与元数据，不写内容本体（详见 electron/lib/logger.js）
+const logger = require('./lib/logger');
+if (app.isPackaged) {
+  logger.init(app.getPath('appData'));
+} else {
+  logger.init(require('os').tmpdir()); // 开发态日志进临时目录，不污染仓库
+}
+
 // ============================================================ 自动更新（便携版）
 const pkg = require('../package.json');
 // v1.6.0 双目录布局：appRoot = 指针/版本目录所在层（exe 在 app-x.y.z 子目录内时
@@ -108,6 +118,8 @@ const updater = new Updater({
   deps: { log: (...a) => console.log('[updater]', ...a) },
 });
 const UPDATER_ON = !IS_SMOKE && updater.enabled;
+logger.log('main', '进程启动 | v' + app.getVersion() + ' | packaged=' + app.isPackaged
+  + ' | appRoot=' + (app.isPackaged ? appRoot : '(dev)') + ' | updater=' + UPDATER_ON);
 
 function updaterMenuTemplate() {
   if (!UPDATER_ON) return [];
@@ -132,6 +144,7 @@ function updaterMenuTemplate() {
 }
 
 function onRollbackMenu() {
+  logger.log('update', '回滚到上一版');
   if (updater.rollback()) { app.quit(); return; }
   notifyUpdate('回滚未执行', '没有可回滚的旧版本');
 }
@@ -162,6 +175,7 @@ function notifyUpdate(title, body, clickFn) {
 
 async function checkForUpdate(manual) {
   if (updater.state === 'downloading' || updater.state === 'ready') return;
+  logger.log('update', '检查更新' + (manual ? '（手动）' : '（后台）'));
   try {
     const info = await updater.check();
     if (!info || !info.hasUpdate) {
@@ -188,6 +202,7 @@ async function startDownload() {
   if (updater.state !== 'has-update' || !updater.lastCheck) return;
   updater.state = 'downloading';
   updater.progressPct = 0;
+  logger.log('update', '开始下载 v' + updater.lastCheck.version);
   refreshTray();
   let lastUi = 0;
   try {
@@ -206,6 +221,7 @@ async function startDownload() {
     try {
       await updater.applyUpdate();
       updater.state = 'ready';
+      logger.log('update', '新版本已就位 dir=' + updater.pendingVersionDir);
       refreshTray();
       notifyUpdate('新版本已就绪', '点击立即重启进入新版', restartToUpdate);
     } catch (e) {
@@ -220,6 +236,7 @@ async function startDownload() {
           + '\nzip: ' + (updater.zipPath || 'n/a') + '\nappRoot: ' + appRoot + '\n', 'utf8');
       } catch (logE) { console.error('[updater] log write failed:', logE && logE.message); }
       updater.state = 'error';
+      logger.error('update-apply', e);
       refreshTray();
       notifyUpdate('新版本就位失败', '当前版本不受影响。' + errMsg.slice(0, 60) + '（可重试；详见 .update-work\\apply-error.log）');
     }
@@ -232,6 +249,7 @@ async function startDownload() {
 
 function restartToUpdate() {
   if (updater.state !== 'ready') return;
+  logger.log('update', '重启进新版');
   if (updater.restartIntoNew()) { app.quit(); return; }
   // 启动失败必须可见——不再静默吞掉（v1.4.1 历史 bug 即此处无声失灵）
   updater.state = 'error';
@@ -879,6 +897,9 @@ function setupIpc() {
     if (!pendingCapture) return;
     const catId = memoStore._cat(categoryId) ? categoryId : (pendingCapture.categoryId || ROOT_CATEGORY_ID);
     const r = addItemFromClip(pendingCapture, catId);
+    // v1.6.4 日志：只记类型与去重结果（内容本体不落盘——隐私红线）
+    logger.log('capture', '归档 | type=' + (pendingCapture.type || 'text')
+      + ' | duplicate=' + !!(r && r.duplicate));
     memoStore.touchCategory(catId);
     const cat = memoStore._cat(catId);
     try {
@@ -1130,6 +1151,7 @@ if (!locked) {
 
   app.on('window-all-closed', () => { /* 常驻托盘，不退出 */ });
   app.on('before-quit', () => {
+    logger.log('main', '进程退出');
     globalShortcut.unregisterAll();
     if (tray) { tray.destroy(); tray = null; }
     scheduler.stop();
