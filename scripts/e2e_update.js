@@ -134,6 +134,56 @@ async function main() {
     throw new Error('回滚后 targetExe 未指回旧版');
   }
 
+  // ---- 7) v1.6.3 升级器链（关软件-升级-重启 全自动） ----
+  // 场景：真起一个 SnapNoteApp（升级器必须能杀掉它）→ 跑 SnapNoteUpgrader.exe
+  // --e2e --dir=<install> → 断言：旧进程被杀、新版本就位、指针翻转、软件被重启。
+  const upgZipName = fs.readdirSync(RELEASE).find((f) => /^SnapNote-Upgrader-.*\.zip$/.test(f));
+  if (!upgZipName) throw new Error('release 下找不到升级包 zip（组装流水线回归）');
+  const upgDir = path.join(RELEASE, 'e2e-upgrader');
+  fs.rmSync(upgDir, { recursive: true, force: true });
+  fs.mkdirSync(upgDir, { recursive: true });
+  cp.execSync(`tar -xf "${path.join(RELEASE, upgZipName)}" -C "${upgDir}"`, { timeout: 60000 });
+  const upgExe = path.join(upgDir, 'SnapNoteUpgrader.exe');
+  if (!fs.existsSync(upgExe)) throw new Error('升级包缺 SnapNoteUpgrader.exe');
+  if (!fs.existsSync(path.join(upgDir, 'data.zip'))) throw new Error('升级包缺 data.zip');
+  console.log('[e2e] upgrader =', upgZipName);
+
+  // 回滚态此时 current=OLD_DIR——先翻回新版（模拟用户日常用新版，升级器来升未来的版本）
+  dualdir.writeChannelsAtomic(install, { current: NEW_DIR, previous: OLD_DIR });
+  // 真启动当前版（运行中——升级器要杀它）
+  const runningProc = cp.spawn(path.join(install, NEW_DIR, 'SnapNoteApp.exe'), ['--no-sandbox'], {
+    stdio: 'ignore', cwd: path.join(install, NEW_DIR), detached: true,
+  });
+  runningProc.unref();
+  const upAlive = await waitUntil(() => processAlive('SnapNoteApp'), 20000);
+  if (!upAlive) throw new Error('前置失败：SnapNoteApp 未能在 CI 会话启动');
+  console.log('[e2e] SnapNoteApp 已运行（pid 即将升级）');
+
+  // 跑升级器（e2e 无 UI 模式；--dir 跳过寻址）
+  const upgOut = cp.spawnSync(upgExe, ['--e2e', `--dir=${install}`],
+    { encoding: 'utf8', timeout: 240000, cwd: upgDir });
+  console.log('[e2e] upgrader exit =', upgOut.status);
+  if (String(upgOut.stdout || '').trim()) console.log(upgOut.stdout.trim().split('\n').map((l) => '  | ' + l).join('\n'));
+  if (upgOut.status !== 0) {
+    const ul = path.join(install, '.update-work', 'upgrader-log.txt');
+    if (fs.existsSync(ul)) console.error('--- upgrader-log ---\n' + fs.readFileSync(ul, 'utf8') + '--- end ---');
+    throw new Error(`升级器退出码 ${upgOut.status}（上方为落盘日志）`);
+  }
+
+  // 断言升级结果
+  const chU = dualdir.readChannels(install);
+  if (chU.current !== NEW_DIR) throw new Error(`升级后指针 current=${chU.current} ≠ ${NEW_DIR}`);
+  if (chU.previous !== NEW_DIR) throw new Error('升级器应保留旧 current 为 previous');
+  if (!fs.existsSync(path.join(install, NEW_DIR, 'SnapNoteApp.exe'))) throw new Error('升级后主程序缺失');
+  if (!fs.existsSync(path.join(install, '.update-work', 'upgrader-log.txt'))) throw new Error('升级日志缺失（失败可见铁律）');
+
+  // 断言「重启」：升级器拉起了 launcher → SnapNoteApp
+  const relaunched = await waitUntil(() => processAlive('SnapNoteApp'), 25000);
+  try { cp.execSync('taskkill /IM SnapNoteApp.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* */ }
+  try { cp.execSync('taskkill /IM SnapNote.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* */ }
+  if (!relaunched) throw new Error('升级器未重启 SnapNote（launcher 链未拉起）');
+  console.log('[e2e] 升级器链路 OK：杀进程→就位→翻指针→重启');
+
   console.log('E2E_UPDATE_OK');
 }
 

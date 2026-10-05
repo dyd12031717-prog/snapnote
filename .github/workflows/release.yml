@@ -49,21 +49,37 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: 编译启动器 launcher（csc / .NET Framework，双目录根入口）
-        # 启动器逻辑永不变化（PRD 5.1）——读指针拉起 app-<ver>\SnapNoteApp.exe
+      - name: 编译启动器与升级器（Roslyn csc）
+        # 启动器：逻辑永不变化（读指针拉起 app-<ver>\SnapNoteApp.exe）
+        # 升级器：v1.6.3「关软件-升级-重启」全自动升级包（读位置锚/杀进程/翻指针）
+        # 用 VS2022 自带 Roslyn（C#6+：局部函数/异常过滤器）；Framework csc 只到 C#5 编不过
         shell: pwsh
         run: |
-          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-          if (-not (Test-Path $csc)) { Write-Error "csc 不存在：$csc"; exit 1 }
-          & $csc /nologo /target:winexe /win32icon:assets\icon.ico /out:launcher\SnapNote.exe launcher\SnapNoteLauncher.cs
+          $csc = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\MSBuild\Current\Bin\Roslyn\csc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $csc) { $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe" }
+          Write-Host "csc = $csc"
+          if (-not (Test-Path $csc)) { Write-Error "找不到任何 csc 编译器"; exit 1 }
+          $fw = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
+          $refs = @("/r:System.dll", "/r:System.Core.dll", "/r:System.Windows.Forms.dll", "/r:System.Drawing.dll",
+                    "/r:System.IO.Compression.dll", "/r:System.IO.Compression.FileSystem.dll", "/lib:$fw")
+          & $csc @refs /nologo /target:winexe /win32icon:assets\icon.ico /out:launcher\SnapNote.exe launcher\SnapNoteLauncher.cs
           if ($LASTEXITCODE -ne 0) { exit 1 }
           $size = (Get-Item launcher\SnapNote.exe).Length
           Write-Host "launcher size = $size bytes"
           if ($size -lt 5000 -or $size -gt 200000) { Write-Error "启动器体积异常：$size"; exit 1 }
+          & $csc @refs /nologo /target:winexe /out:launcher\SnapNoteUpgrader.exe launcher\SnapNoteUpgrader.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $usize = (Get-Item launcher\SnapNoteUpgrader.exe).Length
+          Write-Host "upgrader size = $usize bytes"
+          if ($usize -lt 5000 -or $usize -gt 300000) { Write-Error "升级器体积异常：$usize"; exit 1 }
 
       - name: 组装双目录成品 zip（launcher + channels.json + app-<ver>/）
         shell: bash
         run: bash scripts/package_dualdir.sh
+
+      - name: 组装升级包（SnapNoteUpgrader.exe + data.zip，v1.6.3）
+        shell: bash
+        run: bash scripts/package_upgrader.sh
 
       - name: 打包产物真实冒烟（组装布局内主程序自检）
         # v1.4.1 教训沿用：GUI 子系统 exe 在 pwsh 里不等待直接返回，退出码被吞。
@@ -93,6 +109,7 @@ jobs:
           files: |
             release/SnapNote-Portable-*-win-x64.zip
             release/SnapNote-Portable-*-win-x64.zip.sha256
+            release/SnapNote-Upgrader-*.zip
           generate_release_notes: true
           fail_on_unmatched_files: true
 
@@ -103,6 +120,7 @@ jobs:
           path: |
             release/SnapNote-Portable-*-win-x64.zip
             release/SnapNote-Portable-*-win-x64.zip.sha256
+            release/SnapNote-Upgrader-*.zip
           retention-days: 3
           if-no-files-found: error
 

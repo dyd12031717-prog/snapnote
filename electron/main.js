@@ -1086,6 +1086,15 @@ if (!locked) {
 
     // 自动更新：v1.6.0 首跑清理（上一版目录/工作目录/迁移残留 .old），随后 15 秒后台静默检查
     updater.cleanupPrevious();
+    // v1.6.3：自报安装位置（升级器 SnapNoteUpgrader.exe 的寻址锚）——
+    // %AppData%\SnapNote\install-location.txt。best-effort：写不进不影响功能。
+    if (app.isPackaged) {
+      try {
+        const locDir = path.join(app.getPath('appData'), 'SnapNote');
+        fs.mkdirSync(locDir, { recursive: true });
+        fs.writeFileSync(path.join(locDir, 'install-location.txt'), appRoot + '\n', 'utf8');
+      } catch (e) { /* 升级器会回落到手选目录 */ }
+    }
     // v1.5.5 遗留：检测上次更新替换失败留痕（PS 链最后一跑的 update-error.log）
     // ——迁移失败不再无声无息；通知一次后清理，避免每次启动都打扰
     const updateErrFile = path.join(appRoot, 'update-error.log');
