@@ -64,15 +64,24 @@
 ## 进度
 
 - [x] M1a 勘察
-- [ ] M1b launcher.cs + executableName + 组装脚本
-- [ ] M2 updater.js applyUpdate/restartIntoNew/rollback/cleanupPrevious
-- [ ] M2b 单测
-- [ ] M3 回滚菜单 + CI + e2e 重写
-- [ ] M4 全量验证 + 发版
+- [x] M1b launcher.cs + executableName + 组装脚本
+- [x] M2 updater.js applyUpdate/restartIntoNew/rollback/cleanupPrevious
+- [x] M2b 单测 102/102（含 dualdir 17 个）
+- [x] M3 回滚菜单 + CI + e2e 重写（三轮回滚修到绿）
+- [x] M4 全量验证 + 发版
 
-## 发版检查单（M4）
+## 发版记录（2026-10-05）
 
-- npm test 全绿（87 旧 + ~15 新）
-- 本地 electron-builder --win zip + 组装（无 launcher 路径）冒烟
-- CI 全绿（build+e2e）→ 真机两跳验收（用户）
-- v1.6.1 验证版随后（Node 链真机跳）
+- commit：4a0a4ab → df320b6（路径断言归一化）→ 6cfb819（zip 跨平台兜底）
+- CI 两坑实测（都是 Windows runner 与本地差异）：
+  1. path.sep 随平台（测试断言写死 '/' 在 CI 反斜杠下挂）→ 断言归一化
+  2. **Git Bash 无 zip 命令**（exit 127）→ 组装脚本兜底链 zip→7z→Compress-Archive + 产物非空自检
+- 最终 RUN 37252440766：build ✓ e2e ✓ Release 上线（106.8MB + sha256）
+- e2e 证据：installed=app-1.6.0 / smoke exit=0 / launcher→SnapNoteApp 链路 OK / E2E_UPDATE_OK
+- 本地打包注意：signAndEditExecutable=false（Linux 无 wine）+ patch_icon.mjs 补图标 + resedit 已入 devDeps
+
+## 用户真机两跳验收（待完成）
+
+- 跳 1（PS 最后一次）：当前 v1.5.x → 托盘「检查更新」→ 升 v1.6.0（旧链 /MIR 恰好铺设新布局）
+- 跳 2（Node 链首秀）：v1.6.0 → v1.6.1 验证版（待发）→ 双目录更新 + 可试「回滚到上一版」
+
