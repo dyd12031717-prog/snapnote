@@ -266,11 +266,26 @@ class Updater {
   /** 查询 GitHub Releases/latest（未启用/无更新时返回 null） */
   async check() {
     if (!this.enabled) return null;
-    const url = `${GITHUB_API}/repos/${this.owner}/${this.repo}/releases/latest`;
-    const res = await this.deps.fetch(url, {
-      headers: { 'User-Agent': 'SnapNote-Updater', Accept: 'application/vnd.github+json' },
-    });
-    if (!res.ok) throw new Error(`更新检查失败 HTTP ${res.status}`);
+    // v1.6.2：检查链也走镜像兜底——api.github.com 在无代理网络里同样不可达
+    // （v1.5.1 只加速了下载，检查一直直连；用户真机「检查失败(网络异常)」实测）。
+    // gh-proxy 系支持 API 转发（域名 + 完整 API URL）。每源 15s 超时防挂起。
+    const apiPath = `/repos/${this.owner}/${this.repo}/releases/latest`;
+    const candidates = [GITHUB_API + apiPath, ...DOWNLOAD_MIRRORS.map((m) => m + GITHUB_API + apiPath)];
+    let res = null;
+    let lastErr = null;
+    for (const url of candidates) {
+      try {
+        const r = await this.deps.fetch(url, {
+          headers: { 'User-Agent': 'SnapNote-Updater', Accept: 'application/vnd.github+json' },
+          signal: (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) ? AbortSignal.timeout(15000) : undefined,
+        });
+        if (r.ok) { res = r; break; }
+        lastErr = new Error(`更新检查失败 HTTP ${r.status}`);
+      } catch (e) {
+        lastErr = e; // 网络错/超时 → 换下一个源
+      }
+    }
+    if (!res) throw lastErr || new Error('更新检查失败（全部源不可达）');
     this.lastCheck = parseRelease(await res.json(), this.currentVersion);
     // v1.5.1：顺带拉取官方 sha256 校验值（几十字节，走官方源不影响速度）。
     // 拉不到（旧版本 Release 无此文件/网络抖动）→ 下载时仅走官方源，安全不降级。

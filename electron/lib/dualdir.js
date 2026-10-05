@@ -163,19 +163,42 @@ async function extractZip(zipPath, destDir, deps) {
   throw lastErr || new Error('解压失败');
 }
 
-/** 同卷 rename、跨卷 copy（fs.rename 跨卷抛 EXDEV） */
+/** 同卷 rename、跨卷 copy（fs.rename 跨卷抛 EXDEV）。
+ *  v1.6.2：Windows Defender/杀软实时扫描刚解压出的 exe 会短暂持有文件锁
+ *  （EPERM/EBUSY/EACCES）——带退避重试 3 次再降级 copy，实测用户
+ *  「下载完成但就位失败」的最可能根因。失败仍抛（上层落盘 apply-error.log）。 */
 function moveDirIntoPlace(srcDir, dstDir) {
-  try {
-    fs.renameSync(srcDir, dstDir);
-  } catch (e) {
-    if (e.code !== 'EXDEV' && e.code !== 'EPERM') throw e;
-    fs.cpSync(srcDir, dstDir, { recursive: true });
-    // 校验目标主程序就位后再删源——挪移半途死时目标不完整会被就位校验拦下
-    if (!fs.existsSync(path.join(dstDir, APP_EXE))) {
-      throw new Error(`新版本目录不完整（缺 ${APP_EXE}）`);
+  const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY']);
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(srcDir, dstDir);
+      return dstDir;
+    } catch (e) {
+      const locky = e.code === 'EXDEV' || LOCK_CODES.has(e.code);
+      if (!locky) throw e;
+      if (locky && e.code !== 'EXDEV' && attempt < 3) {
+        sleep(1000 * (attempt + 1)); // 锁：退避重试（杀软扫描亚秒级完成）
+        continue;
+      }
+      break; // EXDEV（真跨卷）或重试耗尽 → 降级 copy
     }
-    fs.rmSync(srcDir, { recursive: true, force: true });
   }
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.rmSync(dstDir, { recursive: true, force: true });
+      fs.cpSync(srcDir, dstDir, { recursive: true });
+      break;
+    } catch (e) {
+      if (!LOCK_CODES.has(e.code) || attempt >= 3) throw e;
+      sleep(1000 * (attempt + 1));
+    }
+  }
+  // 校验目标主程序就位后再删源——挪移半途死时目标不完整会被就位校验拦下
+  if (!fs.existsSync(path.join(dstDir, APP_EXE))) {
+    throw new Error(`新版本目录不完整（缺 ${APP_EXE}）`);
+  }
+  fs.rmSync(srcDir, { recursive: true, force: true });
   return dstDir;
 }
 

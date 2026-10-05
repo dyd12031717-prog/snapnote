@@ -210,9 +210,18 @@ async function startDownload() {
       notifyUpdate('新版本已就绪', '点击立即重启进入新版', restartToUpdate);
     } catch (e) {
       console.error('[updater] apply failed:', e && e.message);
+      // v1.6.2：失败必须可见——落盘到 appRoot/.update-work/apply-error.log
+      // （用户可直发该文件定位真因；UI 通知带简短原因，不再只有笼统的"失败"）
+      const errMsg = e && e.message ? e.message : String(e);
+      const logPath = path.join(appRoot, dualdir.WORK_DIR, 'apply-error.log');
+      try {
+        fs.mkdirSync(path.dirname(logPath), { recursive: true });
+        fs.writeFileSync(logPath, new Date().toISOString() + ' apply failed: ' + errMsg
+          + '\nzip: ' + (updater.zipPath || 'n/a') + '\nappRoot: ' + appRoot + '\n', 'utf8');
+      } catch (logE) { console.error('[updater] log write failed:', logE && logE.message); }
       updater.state = 'error';
       refreshTray();
-      notifyUpdate('新版本就位失败', '当前版本不受影响，可点击重试');
+      notifyUpdate('新版本就位失败', '当前版本不受影响。' + errMsg.slice(0, 60) + '（可重试；详见 .update-work\\apply-error.log）');
     }
   } catch (e) {
     updater.state = 'error';

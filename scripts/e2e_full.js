@@ -224,7 +224,23 @@ async function main() {
     const bubWs = await cdp(bubble);
     const capPayload = await evaluate(bubWs, `document.body.innerText.slice(0, 120)`).catch(() => null);
     ok('气泡预览内容正确', /e2e-剪贴板捕获/.test(String(capPayload)), String(capPayload).slice(0, 40));
-    // 点归档（选默认分类）
+    // v1.6.2 自研下拉：可展开、级联项齐全、可选中、可滚动（menu overflow-y auto）
+    const miCount = await evaluate(bubWs, `document.querySelectorAll('.mi').length`).catch(() => 0);
+    ok('分类下拉项齐全（≥4 项含快速收集）', Number(miCount) >= 4, `菜单 ${miCount} 项`);
+    await evaluate(bubWs, `document.getElementById('selbox').click()`);
+    await sleep(250);
+    const menuOpen = await evaluate(bubWs, `document.getElementById('selWrap').classList.contains('open')`).catch(() => false);
+    ok('下拉菜单展开', menuOpen === true);
+    const scrollable = await evaluate(bubWs, `(() => { const m = document.getElementById('selMenu'); return m.scrollHeight >= m.clientHeight && getComputedStyle(m).overflowY.includes('auto'); })()`).catch(() => false);
+    ok('菜单可滚动（overflow-y: auto）', scrollable === true);
+    const pickRes = await evaluate(bubWs, `(() => {
+      const items = document.querySelectorAll('.mi');
+      const target = items[Math.min(1, items.length - 1)];
+      target.click();
+      return { picked: !!target.dataset.id, cur: document.getElementById('selCur').textContent };
+    })()`).catch(() => null);
+    ok('下拉点选生效（回填触发条）', !!(pickRes && pickRes.picked && pickRes.cur && pickRes.cur.length > 0), pickRes && pickRes.cur);
+    // 点归档（选中的分类）
     await evaluate(bubWs, "document.getElementById('ok') ? document.getElementById('ok').click() : null").catch(() => null);
     await sleep(800);
     const captureAfter = (await evaluate(noteWs, 'window.snapnote.ready()')).memo.count;

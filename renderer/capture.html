@@ -33,9 +33,26 @@
     color: #6B4E1E; border: 1px solid #E8DBBB; cursor: pointer; max-width: 100px;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .chip:hover { background: #F2DFAD; }
-  .sel { display: flex; align-items: center; gap: 8px; padding: 10px 14px 0; }
-  select { flex: 1; height: 30px; font-size: 12px; color: #4A3000; background: #FFFFFF;
-    border: 1px solid #E5D9BC; border-radius: 8px; padding: 0 8px; outline: none; }
+  /* v1.6.2：自研分类下拉（原生 <select> 的 Chromium 自绘弹层在无边框置顶窗上
+     滚轮失灵且不可控——换 div 菜单，max-height+overflow-y 滚轮必然可用） */
+  .sel { position: relative; padding: 10px 14px 0; display: block; }
+  .selbox { display: flex; align-items: center; gap: 8px; height: 32px; background: #FFFFFF;
+    border: 1px solid #E5D9BC; border-radius: 8px; padding: 0 10px; cursor: pointer; }
+  .selbox:hover, .sel.open .selbox { border-color: #E8930C; }
+  .selbox .cur { flex: 1; font-size: 12px; color: #4A3000; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+  .selbox .caret { flex: 0 0 auto; font-size: 10px; color: #A08650; transition: transform .15s; }
+  .sel.open .caret { transform: rotate(180deg); }
+  .menu { position: absolute; left: 14px; right: 14px; top: 100%; z-index: 30;
+    background: #FFFDF8; border: 1px solid #E5D9BC; border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(40,24,0,.22); max-height: 244px; overflow-y: auto;
+    display: none; padding: 4px; }
+  .sel.open .menu { display: block; }
+  .mi { display: flex; align-items: center; font-size: 12px; padding: 7px 10px;
+    border-radius: 7px; cursor: pointer; color: #4A3000; }
+  .mi:hover { background: #F6EFDC; }
+  .mi.on { background: #FBEBC9; color: #8A5A00; font-weight: 600; }
+  .mi .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .acts { display: flex; gap: 8px; padding: 12px 14px; margin-top: auto; }
   .btn { flex: 1; height: 34px; border: none; border-radius: 9px; font-size: 13px;
     font-weight: 600; cursor: pointer; font-family: inherit; }
@@ -59,7 +76,13 @@
   </div>
   <div class="preview txt" id="preview"></div>
   <div class="chips" id="chips"></div>
-  <div class="sel"><select id="cat"></select></div>
+  <div class="sel" id="selWrap">
+    <div class="selbox" id="selbox" role="combobox" aria-haspopup="listbox" aria-expanded="false">
+      <span class="cur" id="selCur">选择分类…</span>
+      <span class="caret">▼</span>
+    </div>
+    <div class="menu" id="selMenu" role="listbox"></div>
+  </div>
   <div class="acts" id="acts">
     <button class="btn main" id="ok">归档到备忘录</button>
     <button class="btn ghost" id="no">忽略</button>
@@ -82,31 +105,67 @@
   function stopTimer() { if (state.timer) { clearInterval(state.timer); state.timer = null; } }
 
   function buildOptions(categories, recentCatIds) {
-    const sel = $('cat');
-    sel.innerHTML = '';
-    const groups = new Map();
-    for (const c of categories) {
-      const pad = '\u00A0\u00A0'.repeat(Math.min(c.depth, 4));
-      const label = (c.depth > 0 ? '└ ' : '') + c.name + (c.depth > 0 ? '' : '');
-      const opt = document.createElement('option');
-      opt.value = c.id; opt.textContent = pad + label;
-      sel.appendChild(opt);
+    // v1.6.2 自研下拉：菜单项级联缩进（padding-left 随 depth），滚动可靠
+    state.categories = categories || [];
+    const menu = $('selMenu');
+    menu.innerHTML = '';
+    for (const c of state.categories) {
+      const el = document.createElement('div');
+      el.className = 'mi';
+      el.dataset.id = c.id;
+      el.title = c.name;
+      el.style.paddingLeft = (10 + Math.min(c.depth || 0, 6) * 15) + 'px';
+      el.innerHTML = '<span class="nm">' + (c.depth > 0 ? '└ ' : '')
+        + String(c.name).replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</span>';
+      el.onclick = () => { selectCat(c.id); closeMenu(); };
+      menu.appendChild(el);
     }
     if (recentCatIds && recentCatIds.length) selectedCat = recentCatIds[0];
-    const fallback = categories.find(c => c.locked);
+    const fallback = state.categories.find(c => c.locked);
     if (selectedCat == null && fallback) selectedCat = fallback.id;
-    if (selectedCat) sel.value = selectedCat;
+    selectCat(selectedCat);
     const chips = $('chips');
     chips.innerHTML = '';
     for (const id of (recentCatIds || []).slice(0, 3)) {
-      const c = categories.find(x => x.id === id);
+      const c = state.categories.find(x => x.id === id);
       if (!c) continue;
       const el = document.createElement('span');
       el.className = 'chip'; el.textContent = c.name; el.title = c.name;
-      el.onclick = () => { selectedCat = id; sel.value = id; };
+      el.onclick = () => { selectCat(id); closeMenu(); };
       chips.appendChild(el);
     }
   }
+
+  function selectCat(id) {
+    selectedCat = id;
+    const c = (state.categories || []).find(x => x.id === id);
+    $('selCur').textContent = c ? ('　'.repeat(Math.min(c.depth || 0, 4)) + (c.depth > 0 ? '└ ' : '') + c.name)
+      : '选择分类…';
+    $('selCur').title = c ? c.name : '';
+    for (const el of document.querySelectorAll('.mi')) {
+      el.classList.toggle('on', el.dataset.id === id);
+    }
+    // 选中项滚入视野（长列表当前项可能不在首屏）
+    const on = document.querySelector('.mi.on');
+    if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest' });
+  }
+
+  function closeMenu() {
+    $('selWrap').classList.remove('open');
+    $('selbox').setAttribute('aria-expanded', 'false');
+  }
+  $('selbox').onclick = (e) => {
+    e.stopPropagation();
+    const open = $('selWrap').classList.toggle('open');
+    $('selbox').setAttribute('aria-expanded', String(open));
+    if (open) {
+      const on = document.querySelector('.mi.on');
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: 'center' });
+    }
+  };
+  document.addEventListener('click', (e) => {
+    if ($('selWrap').classList.contains('open') && !e.target.closest('.menu')) closeMenu();
+  });
 
   api.onCapturePayload((d) => {
     const pv = $('preview');
@@ -128,7 +187,7 @@
     }, 1000);
   });
 
-  $('cat').onchange = (e) => { selectedCat = e.target.value; };
+  // （分类选择交互已由自研下拉的 selectCat/closeMenu 承接）
 
   $('ok').onclick = () => {
     if (state.archived) return;
@@ -137,7 +196,11 @@
   $('no').onclick = () => { stopTimer(); api.captureIgnore(); };
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { stopTimer(); api.captureIgnore(); }
+    if (e.key === 'Escape') {
+      // 下拉展开时 Esc 只关下拉（不触发忽略气泡——层级语义）
+      if ($('selWrap').classList.contains('open')) { e.stopImmediatePropagation(); closeMenu(); return; }
+      stopTimer(); api.captureIgnore();
+    }
     if (e.key === 'Enter') { $('ok').click(); }
   });
 
