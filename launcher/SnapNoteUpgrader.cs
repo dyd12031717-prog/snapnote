@@ -31,6 +31,7 @@ namespace SnapNoteUpgrader
 {
     static class Program
     {
+        static readonly Encoding NoBom = new UTF8Encoding(false); // UTF-8 无 BOM：写 JSON/配置一律用它（Node JSON.parse 对 BOM 敏感）
         [STAThread]
         static int Main(string[] args)
         {
@@ -69,7 +70,7 @@ namespace SnapNoteUpgrader
                 try
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(logFile));
-                    File.AppendAllText(logFile, DateTime.Now.ToString("s") + " " + tail + Environment.NewLine, Encoding.UTF8);
+                    File.AppendAllText(logFile, DateTime.Now.ToString("s") + " " + tail + Environment.NewLine, NoBom);
                 }
                 catch { /* 尽力 */ }
                 return 0;
@@ -126,7 +127,7 @@ namespace SnapNoteUpgrader
                 string json = "{\"current\":\"" + verName + "\",\"previous\":" 
                     + (old != null ? "\"" + old + "\"" : "null") + "}";
                 string chPath = Path.Combine(appRoot, "channels.json");
-                File.WriteAllText(chPath + ".tmp", json + Environment.NewLine, Encoding.UTF8);
+                File.WriteAllText(chPath + ".tmp", json + Environment.NewLine, NoBom); // 无 BOM：Node JSON.parse 对 BOM 敏感
                 if (File.Exists(chPath)) File.Delete(chPath);
                 File.Move(chPath + ".tmp", chPath);
                 L("指针已翻转：" + verName + "（上一版：" + (old ?? "无") + "）");
@@ -188,7 +189,7 @@ namespace SnapNoteUpgrader
                 try
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(loc));
-                    File.WriteAllText(loc, dlg.SelectedPath + Environment.NewLine, Encoding.UTF8);
+                    File.WriteAllText(loc, dlg.SelectedPath + Environment.NewLine, NoBom);
                 } catch { /* 记不住不影响本次 */ }
                 return dlg.SelectedPath;
             }

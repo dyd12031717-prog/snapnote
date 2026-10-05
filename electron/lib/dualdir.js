@@ -73,10 +73,12 @@ function deriveVersionDir(execPath) {
   return appDirOf(execPath);
 }
 
-/** 读指针文件；缺失/损坏返回 null（不抛——launcher 也遵循此契约） */
+/** 读指针文件；缺失/损坏返回 null（不抛——launcher 也遵循此契约）
+ *  v1.6.3：容错 UTF-8 BOM（C# File.WriteAllText 的 Encoding.UTF8 默认带 BOM，
+ *  JSON.parse 遇 BOM 必炸——实测升级器写指针被此坑静默吞掉） */
 function readChannels(appRoot) {
   try {
-    const raw = fs.readFileSync(path.join(appRoot, CHANNELS_FILE), 'utf8');
+    const raw = fs.readFileSync(path.join(appRoot, CHANNELS_FILE), 'utf8').replace(/^\uFEFF/, '');
     const obj = JSON.parse(raw);
     if (obj && typeof obj.current === 'string') {
       return { current: obj.current, previous: obj.previous || null };
