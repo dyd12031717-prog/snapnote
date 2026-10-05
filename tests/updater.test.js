@@ -9,7 +9,7 @@ const { Readable } = require('stream');
 
 const {
   Updater, compareVersions, pickAsset, pickChecksumAsset, parseChecksum, parseRelease,
-  buildUpdateScript, downloadToFile, downloadVerified, sha256File, psEscape,
+  downloadToFile, downloadVerified, sha256File,
   PLACEHOLDER_OWNER, DOWNLOAD_MIRRORS,
 } = require('../electron/lib/updater');
 
@@ -122,27 +122,41 @@ test('parseRelease：远端更新 / 已最新 / 无资产', () => {
 });
 
 // ------------------------------------------------------------ PS 脚本生成
-test('buildUpdateScript：含关键步骤且路径转义', () => {
-  const s = buildUpdateScript({
-    exeBase: 'SnapNote',
-    appDir: "C:\\Tools\\Snap Note's",
-    zipPath: 'C:\\temp\\update.zip',
-    workDir: 'C:\\temp\\w1',
-  });
-  assert.match(s, /Expand-Archive/); // v1.5.5：tar 失败兜底保留
-  assert.match(s, /System32\\tar\.exe/); // v1.5.5：系统 tar 绝对路径（防 Git GNU tar 抢 PATH）
-  assert.match(s, /robocopy "\$src" "\$appDir" \/MIR/); // v1.4.1：路径含空格时参数须整体引用
-  assert.match(s, /\/XF "\$exeBase\.exe"/);
-  assert.match(s, /Get-Process -Name \$exeBase/);
-  assert.match(s, /Start-Process -FilePath "\$exe"/);
-  assert.match(s, /update-error\.log/); // v1.5.5：失败留痕写到程序目录
-  assert.match(s, /Snap Note''s/); // 单引号 PS 转义
-  assert.doesNotMatch(s, /__undefined__/);
+test('Updater.download：写 zip 到 appRoot/.update-work（同卷工作目录）', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-dl-'));
+  const u = makeUpdater({ appRoot: root });
+  u.deps.fetch = async (url) => {
+    if (url.includes('/releases/latest')) {
+      return { ok: true, status: 200, json: async () => RELEASE };
+    }
+    return { ok: true, status: 200, headers: { get: () => '9' }, body: Readable.from([Buffer.from('zip-bytes')]) };
+  };
+  await u.check();
+  const zip = await u.download();
+  assert.equal(fs.readFileSync(zip, 'utf8'), 'zip-bytes');
+  assert.equal(path.dirname(zip), path.join(root, '.update-work'), 'v1.6.0：工作目录与版本目录同卷（挪移=原子 rename）');
 });
 
-test('psEscape：单引号翻倍', () => {
-  assert.equal(psEscape("a'b"), "a''b");
-  assert.equal(psEscape('plain'), 'plain');
+test('Updater.restartIntoNew：spawn 指针目标 + --wait-lock', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-restart-'));
+  fs.mkdirSync(path.join(root, 'app-1.2.0'));
+  fs.writeFileSync(path.join(root, 'app-1.2.0', 'SnapNoteApp.exe'), 'x');
+  fs.writeFileSync(path.join(root, 'channels.json'), JSON.stringify({ current: 'app-1.2.0', previous: null }));
+  const u = makeUpdater({ appRoot: root });
+  let spawned = null;
+  u.deps.spawn = (cmd, args, opts) => { spawned = { cmd, args, opts }; return { unref() {} }; };
+  assert.equal(u.restartIntoNew(), true);
+  assert.equal(spawned.cmd, path.join(root, 'app-1.2.0', 'SnapNoteApp.exe'));
+  assert.deepEqual(spawned.args, ['--wait-lock'], 'v1.6.0：旧进程退出窗口期锁重试');
+  assert.equal(spawned.opts.detached, true);
+  // 无指针无目录 → false
+  const u2 = makeUpdater({ appRoot: fs.mkdtempSync(path.join(os.tmpdir(), 'updater-empty-')) });
+  assert.equal(u2.restartIntoNew(), false);
+});
+
+test('Updater.applyUpdate：未下载时抛错（防误用），下载后走双目录就位', async () => {
+  const u = makeUpdater();
+  await assert.rejects(() => u.applyUpdate(), /尚未下载/);
 });
 
 // ------------------------------------------------------------ 下载（mock fetch + Node stream）
@@ -209,71 +223,35 @@ test('Updater.check：HTTP 非 200 抛错', async () => {
   await assert.rejects(() => u.check(), /500/);
 });
 
-test('Updater.download：写 zip 到临时目录', async () => {
-  const u = makeUpdater();
-  u.deps.fetch = async (url) => {
-    if (url.includes('/releases/latest')) {
-      return { ok: true, status: 200, json: async () => RELEASE };
-    }
-    return { ok: true, status: 200, headers: { get: () => '9' }, body: Readable.from([Buffer.from('zip-bytes')]) };
-  };
-  await u.check();
-  const zip = await u.download();
-  assert.equal(fs.readFileSync(zip, 'utf8'), 'zip-bytes');
-  assert.match(zip, /snapnote-update-\d+[/\\]update\.zip$/);
-});
 
-test('Updater.applyAndRestart：写脚本并 spawn powershell', () => {
-  const u = makeUpdater();
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-apply-'));
-  u.zipPath = path.join(dir, 'update.zip');
-  fs.writeFileSync(u.zipPath, 'x');
-  let spawned = null;
-  u.deps.spawn = (cmd, args, opts) => {
-    spawned = { cmd, args, opts };
-    return { unref() {} };
-  };
-  const ok = u.applyAndRestart();
-  assert.equal(ok, true);
-  assert.equal(spawned.cmd, 'powershell.exe');
-  assert.deepEqual(spawned.args.slice(0, 3), ['-NoProfile', '-ExecutionPolicy', 'Bypass']);
-  assert.equal(spawned.args[4], path.join(dir, 'update.ps1'));
-  assert.equal(spawned.opts.detached, true);
-  const script = fs.readFileSync(path.join(dir, 'update.ps1'), 'utf8');
-  assert.match(script, new RegExp(u.appDir.replace(/\\/g, '\\\\')));
-  assert.match(script, /System32\\tar\.exe/); // v1.5.5：系统 tar 绝对路径（防 Git GNU tar 抢 PATH）
-});
-
-test('Updater.applyAndRestart：未下载时返回 false', () => {
-  const u = makeUpdater();
-  assert.equal(u.applyAndRestart(), false);
-});
+// （PS 链相关测试随 v1.6.0 双目录重构退役——替换链已无 PowerShell 脚本）
 
 // ------------------------------------------------------------ 装配完备性（v1.4.1 回归）
 // 历史 bug：main.js 构造 Updater 只传了 log，deps.spawn 缺失默认 null →
-// applyAndRestart 恒 false → "重启并更新"点击后无声失灵（不退出、不更新、不报错）。
-// 单测曾全绿，因为 makeUpdater 恒注入 spawn stub——生产装配从未被覆盖。
-test('装配完备性：deps 未传 spawn 时默认注入真实 child_process.spawn', () => {
+// 重启链静默失灵。单测曾全绿，因为 makeUpdater 恒注入 spawn stub——生产装配从未被覆盖。
+test('装配完备性：deps 未传 spawn/execFile 时默认注入真实实现', () => {
   const u = new Updater({
     owner: 'alice',
     repo: 'snapnote',
     currentVersion: '1.0.0',
     appDir: 'C:\\Apps\\SnapNote',
-    exeBase: 'SnapNote',
+    exeBase: 'SnapNoteApp',
     deps: { log: () => {} }, // 模拟 main.js 的最小注入
   });
   assert.equal(typeof u.deps.spawn, 'function', '默认 spawn 应可用（生产缺配防护）');
-  // zipPath 未设置时仍返回 false，但原因不再是"缺 spawn"（spawn 已具备）
-  assert.equal(u.applyAndRestart(), false);
+  assert.equal(typeof u.deps.execFile, 'function', 'v1.6.0：解压器 execFile 默认应可用');
 });
 
-test('Updater.cleanupStale：删除残留 .old（不存在也不报错）', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-stale-'));
-  const u = makeUpdater({ appDir: dir });
-  fs.writeFileSync(path.join(dir, 'SnapNote.exe.old'), 'x');
-  u.cleanupStale();
-  assert.equal(fs.existsSync(path.join(dir, 'SnapNote.exe.old')), false);
-  u.cleanupStale(); // 再跑一次不应抛错
+test('Updater.cleanupPrevious：删残留 .old 与上一版目录（不存在也不报错）', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'updater-stale-'));
+  fs.mkdirSync(path.join(root, 'app-1.0.0'));
+  fs.writeFileSync(path.join(root, 'app-1.0.0', 'SnapNoteApp.exe'), 'old');
+  fs.writeFileSync(path.join(root, 'SnapNoteApp.exe.old'), 'x');
+  fs.writeFileSync(path.join(root, 'channels.json'), JSON.stringify({ current: 'app-1.0.0', previous: null }));
+  const u = makeUpdater({ appRoot: root, exeBase: 'SnapNoteApp' });
+  u.cleanupPrevious();
+  assert.equal(fs.existsSync(path.join(root, 'SnapNoteApp.exe.old')), false);
+  u.cleanupPrevious(); // 再跑一次不应抛错
 });
 
 // ------------------------------------------------------------ 多源下载 + 校验（v1.5.1）

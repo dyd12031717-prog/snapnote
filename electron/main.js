@@ -85,17 +85,25 @@ scheduler.onChange = pushState; // 每日任务滚动/复活后同步 UI（pushS
 
 // ============================================================ 自动更新（便携版）
 const pkg = require('../package.json');
+// v1.6.0 双目录布局：appRoot = 指针/版本目录所在层（exe 在 app-x.y.z 子目录内时
+// 为其父目录；平铺旧布局/开发态为 exe 所在目录）。appDir 保留给清理残留用。
+const dualdir = require('./lib/dualdir');
 const appDir = app.isPackaged ? path.dirname(process.execPath) : ROOT;
+const appRoot = app.isPackaged ? dualdir.deriveAppRoot(process.execPath) : ROOT;
 // v1.4.1：exe 名从自身进程路径推导（打包后 package.json 的 build 字段会被
 // electron-builder 删除，此前靠 build.productName 回落 'SnapNote' 属侥幸巧合）
 const exeBase = app.isPackaged
   ? path.basename(process.execPath, path.extname(process.execPath))
-  : ((pkg.build && pkg.build.productName) || 'SnapNote');
+  // v1.6.0：打包 exe 名由 build.win.executableName 决定（productName 是用户可见
+  // 产品名，不再等于 exe 名——启动器占了 SnapNote.exe）
+  : ((pkg.build && pkg.build.win && pkg.build.win.executableName)
+    || (pkg.build && pkg.build.productName) || 'SnapNoteApp');
 const updater = new Updater({
   owner: pkg.repository && pkg.repository.owner,
   repo: pkg.repository && pkg.repository.repo,
   currentVersion: app.getVersion(),
   appDir,
+  appRoot,
   exeBase,
   deps: { log: (...a) => console.log('[updater]', ...a) },
 });
@@ -107,12 +115,25 @@ function updaterMenuTemplate() {
     switch (updater.state) {
       case 'has-update': return `发现新版本 v${updater.lastCheck.version}，点击下载`;
       case 'downloading': return `正在下载… ${updater.progressPct || 0}%`;
-      case 'ready': return '下载完成，重启并更新 ▸';
-      case 'error': return '更新检查失败，点击重试';
+      case 'applying': return '正在就位新版本…';
+      case 'ready': return `新版本 v${updater.lastCheck.version} 已就绪，重启进新版 ▸`;
+      case 'error': return '更新失败，点击重试';
       default: return '检查更新';
     }
   };
-  return [{ label: labelFor(), click: onUpdaterMenu }];
+  const items = [{ label: labelFor(), click: onUpdaterMenu, enabled: updater.state !== 'applying' }];
+  // v1.6.0：回滚到上一版（主动权交给用户——新版有任何问题，一键退回）
+  const ch = dualdir.readChannels(appRoot);
+  if (ch && ch.previous && ch.previous !== ch.current) {
+    const prevVer = String(ch.previous).replace(/^app-/, '');
+    items.push({ label: `回滚到 v${prevVer}`, click: onRollbackMenu });
+  }
+  return items;
+}
+
+function onRollbackMenu() {
+  if (updater.rollback()) { app.quit(); return; }
+  notifyUpdate('回滚未执行', '没有可回滚的旧版本');
 }
 
 function refreshTray() {
@@ -178,9 +199,21 @@ async function startDownload() {
         refreshTray();
       }
     });
-    updater.state = 'ready';
+    // v1.6.0：下载校验完成后立即在后台「就位」（解压新版本目录 + 翻指针——
+    // 全程无破坏，失败=本次更新失败可重试），用户点重启时已万事俱备。
+    updater.state = 'applying';
     refreshTray();
-    notifyUpdate('新版本就绪', '点击立即重启并完成更新', restartToUpdate);
+    try {
+      await updater.applyUpdate();
+      updater.state = 'ready';
+      refreshTray();
+      notifyUpdate('新版本已就绪', '点击立即重启进入新版', restartToUpdate);
+    } catch (e) {
+      console.error('[updater] apply failed:', e && e.message);
+      updater.state = 'error';
+      refreshTray();
+      notifyUpdate('新版本就位失败', '当前版本不受影响，可点击重试');
+    }
   } catch (e) {
     updater.state = 'error';
     refreshTray();
@@ -190,11 +223,11 @@ async function startDownload() {
 
 function restartToUpdate() {
   if (updater.state !== 'ready') return;
-  if (updater.applyAndRestart()) { app.quit(); return; }
-  // v1.4.1：替换进程启动失败必须可见——不再静默吞掉（历史 bug 即此处无声失灵）
+  if (updater.restartIntoNew()) { app.quit(); return; }
+  // 启动失败必须可见——不再静默吞掉（v1.4.1 历史 bug 即此处无声失灵）
   updater.state = 'error';
   refreshTray();
-  notifyUpdate('重启更新未能启动', '请到 GitHub Releases 手动下载新版本覆盖');
+  notifyUpdate('重启进新版未能启动', '请手动退出后从根目录 SnapNote.exe 启动');
 }
 
 function onUpdaterMenu() {
@@ -1002,7 +1035,22 @@ async function runSmoke() {
 }
 
 // ============================================================ 生命周期
-if (!app.requestSingleInstanceLock()) {
+/**
+ * v1.6.0 单实例锁：更新重启/回滚场景下，新进程 spawn 时旧进程退出存在窗口期。
+ * 带 --wait-lock 启动的进程最多重试 10 秒等锁释放，避免「点了重启进新版，
+ * 新进程起来发现锁还被旧进程占着，直接退出」的竞态空窗。
+ */
+const WAIT_LOCK = process.argv.includes('--wait-lock');
+async function acquireInstanceLock() {
+  for (let attempt = 0; ; attempt++) {
+    if (app.requestSingleInstanceLock()) return true;
+    if (!WAIT_LOCK || attempt >= 20) return false;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+}
+
+acquireInstanceLock().then((locked) => {
+if (!locked) {
   app.quit();
 } else {
   app.on('second-instance', expand);
@@ -1022,11 +1070,11 @@ if (!app.requestSingleInstanceLock()) {
       return;
     }
 
-    // 自动更新：清理上次更新残留，启动 15 秒后台静默检查一次
-    updater.cleanupStale();
-    // v1.5.5：检测上次更新替换失败留痕（PS 脚本 catch 写的 appDir/update-error.log）
-    // ——更新失败不再无声无息；通知一次后清理，避免每次启动都打扰
-    const updateErrFile = path.join(appDir, 'update-error.log');
+    // 自动更新：v1.6.0 首跑清理（上一版目录/工作目录/迁移残留 .old），随后 15 秒后台静默检查
+    updater.cleanupPrevious();
+    // v1.5.5 遗留：检测上次更新替换失败留痕（PS 链最后一跑的 update-error.log）
+    // ——迁移失败不再无声无息；通知一次后清理，避免每次启动都打扰
+    const updateErrFile = path.join(appRoot, 'update-error.log');
     if (app.isPackaged && fs.existsSync(updateErrFile)) {
       try { fs.unlinkSync(updateErrFile); } catch (e) { /* ignore */ }
       if (Notification.isSupported()) {
@@ -1064,6 +1112,7 @@ if (!app.requestSingleInstanceLock()) {
     scheduler.stop();
   });
 }
+}); // acquireInstanceLock().then
 
 // 测试钩子（v1.4.1 回归防护）：node --test 下暴露更新器装配供完备性断言。
 // 装配缺配曾导致"重启更新"静默失灵（deps.spawn 未注入），生产/冒烟环境不触发。

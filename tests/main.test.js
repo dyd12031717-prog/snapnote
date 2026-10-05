@@ -178,7 +178,7 @@ test('手动检查更新 IPC（v1.3.0）：check/download/restart + 状态推送
   process.env.SNAPNOTE_FAST = '1';
 
   // 用桩替换 ./lib/updater（仅 main.js 的 require 生效），驱动完整状态机
-  const calls = { check: 0, download: 0, apply: 0 };
+  const calls = { check: 0, download: 0, apply: 0, restart: 0 };
   class StubUpdater {
     constructor() {
       this.enabled = true; this.currentVersion = '1.2.1';
@@ -186,8 +186,10 @@ test('手动检查更新 IPC（v1.3.0）：check/download/restart + 状态推送
     }
     async check() { calls.check++; this.lastCheck = { hasUpdate: true, version: '1.3.0' }; return this.lastCheck; }
     async download(onProgress) { calls.download++; onProgress(50, 100); return '/tmp/x.zip'; }
-    applyAndRestart() { calls.apply++; return true; }
-    cleanupStale() {}
+    async applyUpdate() { calls.apply++; this.pendingVersionDir = 'app-1.3.0'; return { dir: 'app-1.3.0' }; }
+    restartIntoNew() { calls.restart++; return true; }
+    rollback() { return false; }
+    cleanupPrevious() { return {}; }
   }
   const origLoad = Module._load;
   Module._load = function (request, parent, isMain) {
@@ -227,9 +229,10 @@ test('手动检查更新 IPC（v1.3.0）：check/download/restart + 状态推送
     await new Promise(r => setImmediate(r));   // 后台下载完成 → ready
     assert.ok(true);
 
-    // 4) 就绪后 restart：触发 applyAndRestart（mock app.quit 无害）
+    // 4) 就绪后 restart：下载完成已自动就位（applyUpdate），restart 拉起新版（mock app.quit 无害）
     const r4 = await electron.ipcMain._invoke('update:restart');
-    assert.strictEqual(calls.apply, 1, 'ready 时应触发重启更新');
+    assert.strictEqual(calls.apply, 1, 'v1.6.0：下载完成后应自动就位（applyUpdate）');
+    assert.strictEqual(calls.restart, 1, 'ready 时应 spawn 新版本 exe');
     assert.ok(r4, 'restart 应返回状态对象');
   } finally {
     Module._load = origLoad;
@@ -304,7 +307,7 @@ test('主进程更新器装配完备性（v1.4.1 回归）：spawn 可用 + 失�
   assert.strictEqual(typeof main.__updater.deps.spawn, 'function',
     '主进程 updater.deps.spawn 应默认可用（生产装配缺配曾致更新失灵）');
   // 2) exeBase：开发态从 build.productName 兜底（打包态走 process.execPath basename）
-  assert.strictEqual(main.__exeBase, 'SnapNote', 'exeBase 应为 SnapNote');
+  assert.strictEqual(main.__exeBase, 'SnapNoteApp', 'v1.6.0：主程序 exe 名 SnapNoteApp（启动器占用 SnapNote.exe）');
 
   // 3) 失败可见性：state=ready 但 zip 缺失 → restart 应转 error 并推送 UI（不再静默）
   //    （mock 下 UPDATER_ON=false，updatePayload 显示 disabled 属正确语义；

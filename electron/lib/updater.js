@@ -1,20 +1,28 @@
 'use strict';
 /**
- * 便携版自动更新器 — SnapNote v1.1.0+
+ * 便携版自动更新器 — SnapNote v1.1.0+（v1.6.0 起改用双目录原子切换）
  *
- * 链路：GitHub Releases latest → 比较版本 → 下载便携 zip →
- *       PowerShell 脱离进程执行（等待退出 → 解压 → robocopy 镜像 → exe 两步换名 → 重启）
+ * 链路：GitHub Releases latest → 比较版本 → 下载便携 zip（镜像/续传/sha256）→
+ *       解压新版本目录就位（纯 Node，无破坏）→ 翻指针 channels.json →
+ *       用户「重启进新版」→ spawn 新版本 exe（--wait-lock 避单实例竞态）
+ *
+ * v1.6.0 架构变更（PRD：docs/PRD-dualdir.md）：
+ *  - 替换侧从「退出后 PowerShell 脚本镜像替换」退役为「双目录 + 指针」——
+ *    整类环境故障（PATH 劫持 tar / robocopy 中断半损 / 杀软拦删除替换）
+ *    从源头消灭：任何一步失败 = 停在旧版，重试无害；
+ *  - 失败空间从「用户环境全集」收敛为「有限可测的 Node 逻辑」（单测真跑）。
  *
  * 设计约束：
- *  - 纯逻辑（版本比较 / Release 解析 / PS 脚本生成）无副作用，单测可全覆盖；
- *  - 网络（fetch）与进程（spawn）通过构造参数注入，测试无需真实 GitHub；
- *  - 用户数据存于 userData（AppData），程序目录镜像替换不会触碰数据。
+ *  - 纯逻辑（版本比较 / Release 解析）无副作用，单测可全覆盖；
+ *  - 网络（fetch）与进程（spawn/execFile）通过构造参数注入；
+ *  - 用户数据存于 userData（AppData），版本目录更替不会触碰数据。
  */
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const cp = require('child_process');
 const crypto = require('crypto');
+const dualdir = require('./dualdir');
 
 const GITHUB_API = 'https://api.github.com';
 const PLACEHOLDER_OWNER = '__REPLACE_ME__';
@@ -31,11 +39,6 @@ const DOWNLOAD_MIRRORS = [
 ];
 /** 镜像源首字节超时：迟迟无数据即切换（官方源不限——慢是它的常态） */
 const FIRST_BYTE_MS = 12000;
-
-/** PS 单引号字符串转义：' → '' */
-function psEscape(s) {
-  return String(s).replace(/'/g, "''");
-}
 
 /** 宽松版本比较（v 前缀可选，数字段逐位比）：a<b 返回 -1，相等 0，a>b 返回 1 */
 function compareVersions(a, b) {
@@ -86,87 +89,6 @@ function parseRelease(release, currentVersion) {
     asset,
     checksumAsset: pickChecksumAsset(release),
   };
-}
-
-/**
- * 生成脱机更新 PowerShell 脚本。
- * 关键点：
- *  1) 先等旧进程退出（运行中的 exe 不能被覆盖写入，但可重命名）；
- *  2) robocopy /MIR 镜像新目录到程序目录（排除 exe 本体，单独换名）；
- *  3) exe 两步换名：旧 exe → .old，新 exe 覆盖原名；残留 .old 由新进程启动时清理；
- *  4) zip 顶层可能多一层目录（SnapNote/），自动检测降层。
- */
-function buildUpdateScript({ exeBase, appDir, zipPath, workDir }) {
-  return [
-    '$ErrorActionPreference = \'Stop\'',
-    `$exeBase = '${psEscape(exeBase)}'`,
-    `$appDir  = '${psEscape(appDir)}'`,
-    `$zipPath = '${psEscape(zipPath)}'`,
-    `$workDir = '${psEscape(workDir)}'`,
-    "$extract = Join-Path $workDir 'extract'",
-    "$logFile = Join-Path $workDir 'update.log'",
-    // v1.5.5：失败痕迹同时写到程序目录（用户直观可见）；temp 里的太隐蔽
-    "$errFile = Join-Path $appDir 'update-error.log'",
-    'function Log($m) { Add-Content -LiteralPath $logFile -Value "$((Get-Date).ToString(\'s\')) $m" }',
-    'function LogErr($m) { Log $m; try { Add-Content -LiteralPath $errFile -Value "$((Get-Date).ToString(\'s\')) $m" } catch {} }',
-    'try {',
-    '  Log \'waiting app exit\'',
-    '  $deadline = (Get-Date).AddSeconds(20)',
-    '  while ((Get-Date) -lt $deadline) {',
-    '    if (-not (Get-Process -Name $exeBase -ErrorAction SilentlyContinue)) { break }',
-    '    Start-Sleep -Milliseconds 400',
-    '  }',
-    '  Log \'extract\'',
-    '  if (Test-Path -LiteralPath $extract) { Remove-Item -Recurse -Force -LiteralPath $extract }',
-    '  New-Item -ItemType Directory -Force -Path $workDir | Out-Null',
-    '  New-Item -ItemType Directory -Force -Path $extract | Out-Null',
-    // v1.5.5：绝对路径调 System32 的 bsdtar（支持 zip）。此前直接调 `tar`——
-    // 装了 Git 的机器 PATH 里 GNU tar 抢先被调，而 GNU tar 解不了 zip →
-    // 替换链在第一步即挂（用户真机"点重启无后续"与 CI e2e 失败的头号嫌疑）。
-    // tar 任何失败自动回退 Expand-Archive（慢但稳）——解压永不致命。
-    '  $sysTar = Join-Path $env:SystemRoot "System32\\tar.exe"',
-    '  $tarOk = $false',
-    '  if (Test-Path -LiteralPath $sysTar) {',
-    '    & $sysTar -xf "$zipPath" -C "$extract"',
-    '    if ($LASTEXITCODE -eq 0) { $tarOk = $true } else { Log "sys tar failed rc=$LASTEXITCODE, fallback to Expand-Archive" }',
-    '  }',
-    '  if (-not $tarOk) {',
-    '    Expand-Archive -LiteralPath "$zipPath" -DestinationPath "$extract" -Force',
-    '  }',
-    '  $src = $extract',
-    '  $entries = @(Get-ChildItem -LiteralPath $src)',
-    '  if ($entries.Count -eq 1 -and $entries[0].PSIsContainer) { $src = $entries[0].FullName }',
-    '  Log \'mirror files\'',
-    "  robocopy \"$src\" \"$appDir\" /MIR /XF \"$exeBase.exe\" \"$exeBase.exe.old\" /NFL /NDL /NJH /NJS /NP | Out-Null",
-    '  if ($LASTEXITCODE -ge 8) { throw "robocopy failed: $LASTEXITCODE" }',
-    '  Log \'swap exe\'',
-    '  $exe = Join-Path $appDir "$exeBase.exe"',
-    '  $old = Join-Path $appDir "$exeBase.exe.old"',
-    '  if (Test-Path -LiteralPath $old) { Remove-Item -Force -LiteralPath $old -ErrorAction SilentlyContinue }',
-    '  if (Test-Path -LiteralPath $exe) { Move-Item -Force -LiteralPath "$exe" "$old" }',
-    '  Copy-Item -Force -LiteralPath (Join-Path $src "$exeBase.exe") "$exe"',
-    '  Log \'restart\'',
-    '  Start-Process -FilePath "$exe" -WorkingDirectory "$appDir"',
-    '  Start-Sleep -Seconds 2',
-    '  Remove-Item -Recurse -Force -LiteralPath $workDir -ErrorAction SilentlyContinue',
-    '  try { Remove-Item -Force -LiteralPath $errFile -ErrorAction SilentlyContinue } catch {}',
-    '  Log \'done\'',
-    '} catch {',
-    '  LogErr "ERROR: $($_.Exception.Message)"',
-    // v1.5.5 回滚保底：若失败发生在 exe 换名之后（旧 exe 已改名 .old 而新 exe
-    // 未就位），把旧 exe 换回来并拉起——绝不把用户留在"目录里没有 exe"的死局
-    '  try {',
-    '    $exeRb = Join-Path $appDir "$exeBase.exe"',
-    '    $oldRb = Join-Path $appDir "$exeBase.exe.old"',
-    '    if (-not (Test-Path -LiteralPath $exeRb) -and (Test-Path -LiteralPath $oldRb)) {',
-    '      Move-Item -Force -LiteralPath $oldRb $exeRb',
-    '      LogErr \'rolled back exe\'',
-    '    }',
-    '    if (Test-Path -LiteralPath $exeRb) { Start-Process -FilePath "$exeRb" -WorkingDirectory "$appDir" }',
-    '  } catch { LogErr "rollback failed: $($_.Exception.Message)" }',
-    '  exit 1',
-    '}',
-  ].join('\n');
 }
 
 /**
@@ -311,11 +233,17 @@ class Updater {
     this.owner = o.owner;
     this.repo = o.repo;
     this.currentVersion = o.currentVersion;
+    // v1.6.0：appRoot = 双目录布局的应用根（指针/版本目录所在层）。
+    // 兼容：未传时回落 appDir（v1.5.x 平铺中间态/开发态）。
+    this.appRoot = o.appRoot || o.appDir;
     this.appDir = o.appDir;
     this.exeBase = o.exeBase;
     // v1.4.1 教训（生产装配缺配导致"重启更新"静默失灵）：spawn 默认给真实的
     // child_process.spawn——main.js 忘传时不再静默短路；测试仍可注入 stub 覆盖。
-    this.deps = Object.assign({ fetch, spawn: cp.spawn, log: () => {}, tmpdir: () => os.tmpdir() }, o.deps);
+    this.deps = Object.assign(
+      { fetch, spawn: cp.spawn, execFile: (cmd, args, cb) => cp.execFile(cmd, args, cb), log: () => {}, tmpdir: () => os.tmpdir() },
+      o.deps,
+    );
     this.state = 'idle';          // idle | has-update | downloading | ready | error
     this.lastCheck = null;        // parseRelease 结果
     this.zipPath = null;          // 已下载的 zip
@@ -326,11 +254,13 @@ class Updater {
     return !!this.owner && this.owner !== PLACEHOLDER_OWNER && !!this.repo;
   }
 
-  /** 清理上次更新残留的旧 exe */
-  cleanupStale() {
-    try {
-      fs.rmSync(path.join(this.appDir, `${this.exeBase}.exe.old`), { force: true });
-    } catch (e) { /* 忽略 */ }
+  /**
+   * 新版本首跑清理（v1.6.0）：删上一版目录 + 工作目录 + 迁移残留 .old。
+   * 全部 best-effort——失败不影响运行，下次启动再清。
+   * 注意：必须由「指针 current 指向的程序」调用（运行中的旧目录删不掉也无害）。
+   */
+  cleanupPrevious() {
+    return dualdir.cleanupPrevious(this.appRoot, this.exeBase);
   }
 
   /** 查询 GitHub Releases/latest（未启用/无更新时返回 null） */
@@ -359,7 +289,10 @@ class Updater {
   async download(onProgress) {
     const info = this.lastCheck;
     if (!info || !info.asset || !info.asset.url) throw new Error('没有可下载的更新');
-    const workDir = path.join(this.deps.tmpdir(), `snapnote-update-${Date.now()}`);
+    // v1.6.0：工作目录固定在 appRoot/.update-work——与版本目录同卷，
+    // 后续挪移必为原子 rename；失败留痕也在用户可见的程序目录内。
+    const workDir = path.join(this.appRoot, dualdir.WORK_DIR);
+    fs.rmSync(workDir, { recursive: true, force: true });
     fs.mkdirSync(workDir, { recursive: true });
     this.zipPath = path.join(workDir, 'update.zip');
     const r = await downloadVerified(
@@ -371,29 +304,56 @@ class Updater {
   }
 
   /**
-   * 写出 update.ps1 并脱离进程启动 PowerShell 执行（等待退出→解压→镜像→换 exe→重启），
-   * 随后调用方应立即退出应用。@returns {boolean} 是否成功启动更新进程。
-   * 契约：zipPath 必须位于独占临时目录（download() 的产物即此形态）——
-   * PS 脚本最后会 Remove-Item -Recurse 整个 workDir（= zip 所在目录）。
+   * 应用新版本（v1.6.0 双目录）：解压 zip → app-<new> 目录就位 → 原子翻指针。
+   * 无破坏性：任何一步抛错 = 本次更新失败，当前版本与指针原封不动，可重试。
+   * 成功后用户随时可 restartIntoNew()；不重启也不影响当前进程。
+   * @returns {Promise<{dir:string}>} 新版本目录名
    */
-  applyAndRestart() {
-    if (!this.zipPath) return false;
-    const workDir = path.dirname(this.zipPath);
-    const ps1 = path.join(workDir, 'update.ps1');
-    const script = buildUpdateScript({
-      exeBase: this.exeBase,
-      appDir: this.appDir,
+  async applyUpdate() {
+    if (!this.zipPath) throw new Error('尚未下载更新包');
+    const r = await dualdir.installNewVersion({
       zipPath: this.zipPath,
-      workDir,
+      appRoot: this.appRoot,
+      deps: this.deps,
     });
-    fs.writeFileSync(ps1, script, 'utf8');
-    this.deps.log('updater: launch powershell', ps1);
+    this.pendingVersionDir = r.dir;
+    return r;
+  }
+
+  /**
+   * 重启进新版：拉起指针 current 指向的版本目录里的主程序后退出（退出由调用方执行）。
+   * --wait-lock：旧进程退出存在窗口期，新进程带锁重试（单实例锁竞态防护）。
+   * @returns {boolean} 是否成功启动新进程
+   */
+  restartIntoNew() {
+    const target = dualdir.targetExe(this.appRoot);
+    if (!target) return false;
+    this.deps.log('updater: restart into', target);
     if (!this.deps.spawn) return false;
-    const child = this.deps.spawn(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1],
-      { detached: true, stdio: 'ignore' },
-    );
+    const child = this.deps.spawn(target, ['--wait-lock'], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: path.dirname(target),
+    });
+    child.unref();
+    return true;
+  }
+
+  /**
+   * 回滚到上一版（v1.6.0）：翻转指针后经根启动器拉起旧版本。
+   * @returns {boolean} 是否成功启动
+   */
+  rollback() {
+    const c = dualdir.rollbackChannels(this.appRoot);
+    if (!c) return false;
+    const launcher = path.join(this.appRoot, 'SnapNote.exe');
+    this.deps.log('updater: rollback to', c.current, 'via', launcher);
+    if (!this.deps.spawn) return false;
+    const child = this.deps.spawn(launcher, [], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: this.appRoot,
+    });
     child.unref();
     return true;
   }
@@ -406,11 +366,9 @@ module.exports = {
   pickChecksumAsset,
   parseChecksum,
   parseRelease,
-  buildUpdateScript,
   downloadToFile,
   downloadVerified,
   sha256File,
-  psEscape,
   GITHUB_API,
   PLACEHOLDER_OWNER,
   DOWNLOAD_MIRRORS,

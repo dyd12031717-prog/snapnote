@@ -2,6 +2,8 @@ name: release
 
 # 推送 v* 标签时自动构建 Windows 便携包并发布 GitHub Release
 # 也可在 Actions 页面手动触发（workflow_dispatch）
+# v1.6.0：双目录原子切换布局——zip 根 = { SnapNote.exe(launcher), channels.json, app-<ver>/ }，
+# 主程序更名 SnapNoteApp.exe（构建时 executableName），更新链为纯 Node（详见 docs/PRD-dualdir.md）
 on:
   push:
     tags: ['v*']
@@ -42,17 +44,35 @@ jobs:
       - name: 单元测试
         run: npm test
 
-      - name: 构建 Windows 便携包
-        run: npx electron-builder --win zip --x64
+      - name: 构建 Windows 便携包（仅目录形态，双目录组装由后续步骤完成）
+        run: npx electron-builder --win --dir --x64
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
 
-      - name: 打包产物真实冒烟（运行打包后的 exe 自检）
-        # v1.4.1：GUI 子系统 exe 在 pwsh 里不等待直接返回，退出码被吞（历史假绿）。
-        # 必须 Start-Process -Wait -PassThru 取真实 ExitCode。
+      - name: 编译启动器 launcher（csc / .NET Framework，双目录根入口）
+        # 启动器逻辑永不变化（PRD 5.1）——读指针拉起 app-<ver>\SnapNoteApp.exe
         shell: pwsh
         run: |
-          $p = Start-Process -FilePath ".\release\win-unpacked\SnapNote.exe" -ArgumentList "--smoke-test" -PassThru -Wait
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) { Write-Error "csc 不存在：$csc"; exit 1 }
+          & $csc /nologo /target:winexe /win32icon:assets\icon.ico /out:launcher\SnapNote.exe launcher\SnapNoteLauncher.cs
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $size = (Get-Item launcher\SnapNote.exe).Length
+          Write-Host "launcher size = $size bytes"
+          if ($size -lt 5000 -or $size -gt 200000) { Write-Error "启动器体积异常：$size"; exit 1 }
+
+      - name: 组装双目录成品 zip（launcher + channels.json + app-<ver>/）
+        shell: bash
+        run: bash scripts/package_dualdir.sh
+
+      - name: 打包产物真实冒烟（组装布局内主程序自检）
+        # v1.4.1 教训沿用：GUI 子系统 exe 在 pwsh 里不等待直接返回，退出码被吞。
+        # v1.6.0：跑组装后的 app-<ver>\SnapNoteApp.exe（与用户实际运行的二进制同路径形态）
+        shell: pwsh
+        run: |
+          $app = Get-ChildItem "release\.staging\app-*" -Directory | Select-Object -First 1
+          if (-not $app) { Write-Error "staging 下无 app-* 目录"; exit 1 }
+          $p = Start-Process -FilePath "$($app.FullName)\SnapNoteApp.exe" -ArgumentList "--smoke-test" -PassThru -Wait
           Write-Host "smoke exit code: $($p.ExitCode)"
           exit $p.ExitCode
         env:
@@ -81,15 +101,16 @@ jobs:
         with:
           name: build-output
           path: |
-            release/win-unpacked/**
             release/SnapNote-Portable-*-win-x64.zip
+            release/SnapNote-Portable-*-win-x64.zip.sha256
           retention-days: 3
           if-no-files-found: error
 
-  # 端到端更新自测：独立 job，失败不阻断 Release 发布（用户能正常拿包），
-  # 但会在 Actions 页面亮红提醒。Windows runner 服务会话的进程树行为与真实
-  # 桌面存在差异（detached PowerShell 更新脚本 + taskkill 时序），此 job
-  # 用于持续观测真实替换链健康度，失败时优先看其日志里的 update.log 转储。
+  # 端到端更新自测（v1.6.0 双目录链）：独立 job，失败不阻断 Release 发布
+  # （用户能正常拿包），但会在 Actions 页面亮红。真实 Windows 上跑：
+  # zip 解压 → installNewVersion 就位翻指针 → 新 exe 冒烟 → launcher 入口链 → 回滚。
+  # v1.5.x 时代此 job 观测的是 PS 镜像替换链健康度；现在 PS 链已退役，
+  # Node 链全部在单测覆盖，本 job 验证「真实 exe/launcher/文件系统」这一层。
   e2e-update:
     runs-on: windows-latest
     needs: build-windows
@@ -107,8 +128,6 @@ jobs:
           name: build-output
           path: release
 
-      - name: 端到端更新自测（真实跑一遍“重启更新”替换链路）
-        # v1.4.1：历史上"重启并更新"因生产装配缺配静默失灵，单测曾全绿。
-        # 此步骤在真实 Windows 上执行完整 PowerShell 替换链（旧目录→镜像→换 exe→拉起新进程）。
+      - name: 端到端更新自测（真实跑一遍双目录更新链）
         run: node scripts/e2e_update.js
         timeout-minutes: 12

@@ -1,10 +1,12 @@
-// 用 resedit 纯 JS 替换 win-unpacked/SnapNote.exe 的图标组（替代 wine+rcedit）
+// 用 resedit 纯 JS 替换 win-unpacked/SnapNoteApp.exe 的图标组（替代 wine+rcedit）
+// v1.6.0：主程序改名 SnapNoteApp（根入口 SnapNote.exe 由 launcher.cs 编译，
+// 图标经 csc /win32icon 直接嵌入，不经本脚本）
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { NtExecutable, NtExecutableResource, Data, Resource } from 'resedit';
 
 const ROOT = '/home/z/my-project/snapnote';
-const EXE = path.join(ROOT, 'release/win-unpacked/SnapNote.exe');
+const EXE = path.join(ROOT, 'release/win-unpacked/SnapNoteApp.exe');
 const ICO = path.join(ROOT, 'assets/icon.ico');
 
 const data = fs.readFileSync(EXE);
@@ -33,7 +35,7 @@ vi.setStringValues({
     FileVersion: '1.0.0.0',
     ProductName: 'SnapNote',
     ProductVersion: '1.0.0.0',
-    OriginalFilename: 'SnapNote.exe',
+    OriginalFilename: 'SnapNoteApp.exe',
     LegalCopyright: 'MIT License',
   },
 });

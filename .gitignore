@@ -24,3 +24,8 @@ design/mockups/vlm_check*.json
 *.log
 .DS_Store
 Thumbs.db
+
+# v1.6.0 双目录更新链开发态工作目录（appRoot=仓库根时）
+.update-work/
+# 启动器编译产物（CI 编译，不入库）
+launcher/SnapNote.exe

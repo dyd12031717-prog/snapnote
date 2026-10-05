@@ -1,123 +1,153 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * 端到端更新自测（v1.4.1 新增，仅 Windows / CI）
+ * 端到端更新自测 v1.6.0（双目录原子切换，仅 Windows / CI）
  *
- * 在真实文件系统上跑完整"重启更新"链路（与生产同构）：
- *   旧目录（win-unpacked 副本 + 旧版私有文件）→ Updater.applyAndRestart（真实
- *   spawn powershell.exe）→ PS：等待退出 → tar 解压 → robocopy 镜像 → exe 换名 →
- *   Start-Process 新 exe → 清理 workDir
+ * 在真实文件系统上跑与生产同构的「应用内 Node 更新链」：
+ *   模拟安装目录（launcher + channels.json + app-旧版/）
+ *   → dualdir.installNewVersion（解压 zip → app-新版/ 就位 → 原子翻指针）
+ *   → 断言：新目录就位、指针翻转、旧版保留（无破坏）
+ *   → 真实 spawn 新版 exe --smoke-test（真实 Electron 自检）
+ *   → 真实 spawn 根 launcher → 断言它拉起 app 目录主程序（入口链）
+ *   → 回滚：翻转指针 → targetExe 指回旧版
  *
- * 断言：
- *   1) applyAndRestart 返回 true（spawn 成功——v1.4.1 前因生产缺配恒 false）
- *   2) 旧版私有文件被 /MIR 镜像清掉（目录真的被新版本替换）
- *   3) 新 SnapNote.exe 就位（旧 exe 换名 .old 保留属预期）
- *
- * 可靠性设计（CI 实战教训）：
- *   - 轮询用事件循环 setTimeout（主线程 Atomics.wait 在 runner 上曾观测到挂起）
- *   - 成功/失败/硬超时三路都显式 process.exit——Windows 下 detached 子进程
- *     句柄可能令 node 自然退出失灵，绝不赌事件循环清空
- *   - 失败时自动转储 workDir/update.log（PS catch 的 ERROR 直接进 CI 日志）
- *
- * 运行前提：electron-builder 已产出 release/win-unpacked 与便携 zip。
+ * 对比旧版（v1.4.1 PS 链）：无 PowerShell、无 robocopy、无删除动作——
+ * 任何失败都发生在「加新」阶段，install 目录旧内容必须原样保留。
  */
-
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { execSync } = require('child_process');
-const { Updater } = require('../electron/lib/updater');
+const cp = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const RELEASE = path.join(ROOT, 'release');
-let workDir = null; // 失败转储 update.log 用
+const dualdir = require(path.join(ROOT, 'electron', 'lib', 'dualdir'));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function dumpLog() {
+/** 失败时转储安装目录树（失败必须可见——对齐 PS 链时代 update.log 转储惯例） */
+function dumpTree(dir) {
   try {
-    const logPath = workDir && path.join(workDir, 'update.log');
-    if (logPath && fs.existsSync(logPath)) {
-      console.error('--- update.ps1 log ---');
-      console.error(fs.readFileSync(logPath, 'utf8'));
-      console.error('--- end ---');
-    } else {
-      console.error('(workDir 无 update.log——PS 未及落盘或未执行)');
-    }
-  } catch (e) { /* 诊断转储失败不影响结论 */ }
+    console.error('--- install 目录树 ---');
+    const walk = (d, prefix) => {
+      for (const name of fs.readdirSync(d)) {
+        const p = path.join(d, name);
+        const st = fs.statSync(p);
+        console.error(`${prefix}${name}${st.isDirectory() ? '/' : ` (${st.size}B)`}`);
+        if (st.isDirectory() && !name.startsWith('app-')) { /* 只下钻一层，版本目录内容太长 */ }
+      }
+    };
+    walk(dir, '  ');
+    console.error('--- end ---');
+  } catch (e) { /* 转储失败不影响结论 */ }
+}
+
+/** 轮询等待条件成立（返回是否成立） */
+async function waitUntil(fn, timeoutMs, everyMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fn()) return true;
+    await sleep(everyMs);
+  }
+  return fn();
+}
+
+/** spawn GUI 子系统 exe 并等退出码（node spawn 的 exit 事件对 GUI exe 同样触发） */
+function runExe(exe, args) {
+  return new Promise((resolve, reject) => {
+    const ch = cp.spawn(exe, args, { stdio: 'ignore', cwd: path.dirname(exe) });
+    const timer = setTimeout(() => { try { ch.kill(); } catch (e) { /* */ } reject(new Error(`${path.basename(exe)} 超时未退出`)); }, 240000);
+    ch.on('error', (e) => { clearTimeout(timer); reject(e); });
+    ch.on('exit', (code) => { clearTimeout(timer); resolve(code); });
+  });
+}
+
+/** tasklist 查某进程名是否存活 */
+function processAlive(name) {
+  try {
+    const out = cp.execSync(`tasklist /FI "IMAGENAME eq ${name}.exe" /NH`, { encoding: 'utf8', timeout: 15000 });
+    return out.toLowerCase().includes(`${name.toLowerCase()}.exe`);
+  } catch (e) { return false; }
 }
 
 async function main() {
-  if (process.platform !== 'win32') throw new Error('仅 Windows 可跑（PowerShell 链路）');
+  if (process.platform !== 'win32') throw new Error('仅 Windows 可跑（双目录链路含真实 exe/launcher）');
   const zipName = fs.readdirSync(RELEASE).find((f) => /^SnapNote-Portable-.*-win-x64\.zip$/.test(f));
   if (!zipName) throw new Error('release 下找不到便携 zip');
   const zipPath = path.join(RELEASE, zipName);
 
-  // 旧目录：win-unpacked 副本 + 旧版私有文件（镜像替换后必须消失）
-  const appDir = path.join(RELEASE, 'e2e-old');
-  fs.rmSync(appDir, { recursive: true, force: true });
-  fs.cpSync(path.join(RELEASE, 'win-unpacked'), appDir, { recursive: true });
-  const oldMarker = path.join(appDir, 'OLD-VERSION-MARKER.txt');
-  fs.writeFileSync(oldMarker, 'this file must vanish after /MIR');
+  // ---- 1) 模拟用户安装目录（= 全新解压 v1.6.0 zip 的形态）----
+  const install = path.join(RELEASE, 'e2e-install');
+  fs.rmSync(install, { recursive: true, force: true });
+  fs.mkdirSync(path.join(install, dualdir.WORK_DIR), { recursive: true });
+  cp.execSync(`tar -xf "${zipPath}" -C "${install}"`, { timeout: 120000 });
+  const ch0 = dualdir.readChannels(install);
+  if (!ch0 || !ch0.current) throw new Error('zip 解压后 channels.json 缺失/损坏（组装流水线回归）');
+  const NEW_DIR = ch0.current; // app-<tag 版本>
+  console.log('[e2e] install =', install, '| zip 版本目录 =', NEW_DIR);
+  if (!fs.existsSync(path.join(install, 'SnapNote.exe'))) throw new Error('zip 根缺启动器 SnapNote.exe');
+  if (!fs.existsSync(path.join(install, NEW_DIR, 'SnapNoteApp.exe'))) throw new Error('版本目录缺主程序');
 
-  // zip 必须位于独占 workDir（PS 末尾 Remove -Recurse 整个目录——release 绝不能当 workDir）
-  workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'snapnote-e2e-'));
-  const zipCopy = path.join(workDir, 'update.zip');
-  fs.copyFileSync(zipPath, zipCopy);
+  // ---- 2) 构造「旧版用户」：把新目录复制为 app-0.0.1 旧版 + 指针指向它 ----
+  // （生产里 app-0.0.1 是历史版本；此处用同构副本保证 Electron 真可跑）
+  const OLD_DIR = 'app-0.0.1';
+  fs.cpSync(path.join(install, NEW_DIR), path.join(install, OLD_DIR), { recursive: true });
+  dualdir.writeChannelsAtomic(install, { current: OLD_DIR, previous: null });
+  const oldExe = path.join(install, OLD_DIR, 'SnapNoteApp.exe');
 
-  const u = new Updater({
-    owner: 'dyd12031717-prog',
-    repo: 'snapnote',
-    currentVersion: '0.0.0',
-    appDir,
-    exeBase: 'SnapNote',
-    deps: { log: (m) => console.log('[e2e]', m) }, // spawn 走默认真实实现——这正是回归点
+  // ---- 3) 应用内更新：zip 就位（下载产物位 = install/.update-work/update.zip）----
+  fs.copyFileSync(zipPath, path.join(install, dualdir.WORK_DIR, 'update.zip'));
+  const r = await dualdir.installNewVersion({
+    zipPath: path.join(install, dualdir.WORK_DIR, 'update.zip'),
+    appRoot: install,
+    deps: { log: (m) => console.log('[e2e]', m) },
   });
-  u.zipPath = zipCopy;
-  u.state = 'ready';
+  console.log('[e2e] installed:', r.dir);
+  if (r.dir !== NEW_DIR) throw new Error(`就位目录不符：${r.dir} ≠ ${NEW_DIR}`);
+  const ch1 = dualdir.readChannels(install);
+  if (ch1.current !== NEW_DIR) throw new Error(`指针未翻：current=${ch1.current}`);
+  if (ch1.previous !== OLD_DIR) throw new Error(`previous 应保留旧版：${ch1.previous}`);
+  if (!fs.existsSync(oldExe)) throw new Error('旧版目录被破坏——违反无破坏性契约');
+  if (fs.existsSync(path.join(install, OLD_DIR, 'SnapNoteApp.exe')) === false) throw new Error('旧版 exe 被删');
 
-  console.log('[e2e] appDir =', appDir);
-  console.log('[e2e] zip =', zipCopy);
-  const launched = u.applyAndRestart();
-  if (!launched) throw new Error('applyAndRestart 返回 false——替换进程未启动（v1.4.1 回归）');
+  // ---- 4) 真实跑新版 exe 冒烟（Electron 自检；--wait-lock 同参数无害）----
+  const newExe = path.join(install, NEW_DIR, 'SnapNoteApp.exe');
+  const code = await runExe(newExe, ['--smoke-test']);
+  console.log('[e2e] smoke exit =', code);
+  if (code !== 0) throw new Error(`新版 exe 冒烟失败（exit=${code}）`);
 
-  // 轮询等待替换完成（tar 解压 106MB + robocopy 镜像；留 300s 余量）
-  const deadline = Date.now() + 300000;
-  while (Date.now() < deadline) {
-    if (!fs.existsSync(oldMarker)) break;
-    await sleep(1000);
+  // ---- 5) launcher 入口链：跑根 SnapNote.exe → 必须拉起 app 目录主程序 ----
+  const launcher = path.join(install, 'SnapNote.exe');
+  const lch = cp.spawn(launcher, [], { detached: true, stdio: 'ignore', cwd: install });
+  lch.unref();
+  const up = await waitUntil(() => processAlive('SnapNoteApp'), 30000);
+  try { cp.execSync('taskkill /IM SnapNoteApp.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* */ }
+  try { cp.execSync('taskkill /IM SnapNote.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* */ }
+  if (!up) throw new Error('launcher 未能拉起 SnapNoteApp（入口链断）');
+  console.log('[e2e] launcher → SnapNoteApp 链路 OK');
+
+  // ---- 6) 回滚：指针翻回旧版，targetExe 指向旧目录 ----
+  if (!dualdir.rollbackChannels(install)) throw new Error('回滚失败（previous 缺失？）');
+  const ch2 = dualdir.readChannels(install);
+  if (ch2.current !== OLD_DIR) throw new Error(`回滚后 current=${ch2.current} ≠ ${OLD_DIR}`);
+  if (dualdir.targetExe(install) !== path.join(install, OLD_DIR, 'SnapNoteApp.exe')) {
+    throw new Error('回滚后 targetExe 未指回旧版');
   }
-  if (fs.existsSync(oldMarker)) throw new Error('镜像替换未完成：旧版标记文件仍在（robocopy /MIR 未生效或 PS 脚本失败）');
-
-  const exe = path.join(appDir, 'SnapNote.exe');
-  if (!fs.existsSync(exe)) throw new Error('替换后 SnapNote.exe 缺失');
-
-  // 旧 exe 换名保留（.old）属预期；下次启动 cleanupStale 清理
-  console.log('[e2e] exe.old exists =', fs.existsSync(path.join(appDir, 'SnapNote.exe.old')));
-
-  // workDir 应被 PS 清理（zip 副本随之删除）
-  await sleep(6000); // Start-Process 后 PS 还有 2 秒收尾
-  if (fs.existsSync(zipCopy)) console.log('[e2e] warn: workDir 未清理（不影响判定，下次 cleanupStale 兜底）');
-
-  // 新 exe 已被拉起 → 收尾杀掉（CI 环境不留常驻进程）
-  // timeout: execSync 同步挂起兜底（taskkill 对孤儿进程树偶发不返回）
-  try { execSync('taskkill /IM SnapNote.exe /F /T', { stdio: 'ignore', timeout: 20000 }); } catch (e) { /* 已退/超时均忽略 */ }
 
   console.log('E2E_UPDATE_OK');
 }
 
-// 硬超时兜底（比 CI 步骤 timeout 更早触发，保证日志/转储完整落地）
+// 硬超时兜底（比 CI 步骤 timeout 更早触发，保证转储落地）
 setTimeout(() => {
-  console.error('E2E_UPDATE_FAIL: 硬超时 6 分钟（替换链未在时限内完成）');
-  dumpLog();
+  console.error('E2E_UPDATE_FAIL: 硬超时 8 分钟');
   process.exit(1);
-}, 360000).unref();
+}, 480000).unref();
 
 main().then(
-  () => process.exit(0), // 显式退出：Windows detached 子进程句柄可能挂住自然退出
+  () => process.exit(0),
   (err) => {
     console.error('E2E_UPDATE_FAIL: ' + (err && err.message));
-    dumpLog();
+    dumpTree(path.join(RELEASE, 'e2e-install'));
     process.exit(1);
   },
 );
