@@ -156,8 +156,32 @@
   .detail textarea:focus, .detail select:focus { border-color: #E8930C; background: #fff;
     box-shadow: 0 0 0 3px rgba(232,147,12,.15); }
   .detail .bigimg { border-radius: 10px; border: 1px solid #EFE8D8; background: #F4F1EA;
-    display: flex; align-items: center; justify-content: center; padding: 8px; }
-  .detail .bigimg img { max-width: 100%; max-height: 300px; object-fit: contain; }
+    display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px; }
+  .detail .bigimg img { max-width: 100%; max-height: 300px; object-fit: contain;
+    cursor: zoom-in; -webkit-user-drag: none; user-drag: none; }
+  .detail .bigimg .hint { font-size: 11px; color: #A08E66; margin-top: 5px; }
+  .item .imgbox img { -webkit-user-drag: none; user-drag: none; }
+
+  /* ---------- v1.6.1 图片查看器（放大看） ---------- */
+  #lightbox { position: fixed; inset: 0; z-index: 300; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(24,18,8,.84); backdrop-filter: blur(5px); }
+  #lightbox.open { display: flex; animation: lbIn .16s ease-out; }
+  @keyframes lbIn { from { opacity: 0; } }
+  #lightbox img { max-width: 92vw; max-height: 90vh; border-radius: 10px;
+    box-shadow: 0 24px 90px rgba(0,0,0,.6); cursor: grab;
+    -webkit-user-drag: none; user-drag: none; touch-action: none; will-change: transform; }
+  #lightbox img:active { cursor: grabbing; }
+  #lightbox .lbClose { position: absolute; top: 16px; right: 20px; width: 34px; height: 34px;
+    border: 1px solid rgba(255,255,255,.28); border-radius: 10px;
+    background: rgba(255,255,255,.1); color: rgba(255,255,255,.85); font-size: 15px;
+    cursor: pointer; line-height: 1; }
+  #lightbox .lbClose:hover { background: rgba(255,255,255,.22); }
+  #lightbox .lbZoom { position: absolute; right: 24px; bottom: 18px;
+    color: rgba(255,255,255,.72); font-size: 12px; letter-spacing: .5px;
+    background: rgba(0,0,0,.28); padding: 3px 10px; border-radius: 999px; }
+  #lightbox .lbTips { position: absolute; left: 24px; bottom: 18px;
+    color: rgba(255,255,255,.45); font-size: 11.5px; }
   .detail select { width: 100%; height: 32px; border: 1px solid #E5DDC9; border-radius: 8px;
     background: #FAF8F3; padding: 0 8px; font-size: 12.5px; font-family: inherit; color: #3D2E10; outline: none; }
   .detail .row { display: flex; gap: 8px; }
@@ -254,6 +278,14 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
+
+<!-- v1.6.1 图片查看器：点击详情大图唤起 -->
+<div id="lightbox" aria-hidden="true">
+  <button class="lbClose" title="关闭 (Esc)">✕</button>
+  <img alt="图片预览">
+  <div class="lbTips">滚轮缩放 · 拖动查看 · 双击复位 · Esc 关闭</div>
+  <div class="lbZoom">100%</div>
+</div>
 
 <script>
 (() => {
@@ -488,7 +520,7 @@
         + '</div>'
         + (it.type === 'image'
           ? '<div class="body"><div class="imgbox">' + (it.thumbUrl
-            ? '<img src="' + it.thumbUrl + '" loading="lazy">'
+            ? '<img src="' + it.thumbUrl + '" loading="lazy" draggable="false">'
             : '<span style="font-size:11px;color:#A08E66">图片缺失</span>') + '</div></div>'
           : '<div class="body"><div class="txt">' + esc(it.text) + '</div></div>')
         + '<div class="body" style="padding-top:0;flex:0 0 auto"><div class="meta">'
@@ -555,7 +587,7 @@
       + '<option value=""' + (!it.categoryId ? ' selected' : '') + '>（未分类）</option>';
     b.innerHTML =
       (it.type === 'image'
-        ? '<div class="bigimg">' + (it.fullUrl || it.thumbUrl ? '<img src="' + (it.fullUrl || it.thumbUrl) + '">' : '图片缺失') + '</div>'
+        ? '<div class="bigimg">' + (it.fullUrl || it.thumbUrl ? '<img src="' + (it.fullUrl || it.thumbUrl) + '" draggable="false"><div class="hint">点击图片放大查看</div>' : '图片缺失') + '</div>'
         : '<div><label>内容（可编辑）</label><textarea id="dText" rows="7">' + esc(it.text) + '</textarea></div>')
       + '<div><label>备注</label><textarea id="dNote" rows="2" placeholder="给这条内容加点说明…">' + esc(it.note || '') + '</textarea></div>'
       + '<div><label>分类：' + esc(path.join(' › ') || '未分类') + '</label><select id="dCat">' + opts + '</select></div>'
@@ -697,6 +729,73 @@
   }
 
   loadState().catch((e) => console.error('memo init failed', e));
+
+  // ------------------------------------------------------------ v1.6.1 图片查看器（点击放大）
+  // 触发：详情弹层的大图（fullUrl 优先）；交互：滚轮缩放（指针锚点）+
+  // 拖动平移 + 双击复位 + 点空白/Esc/右上角关闭。缩略图已禁默认拖拽。
+  (function lightbox() {
+    const lb = $('lightbox');
+    if (!lb) return;
+    const im = lb.querySelector('img');
+    const zoomEl = lb.querySelector('.lbZoom');
+    let scale = 1, tx = 0, ty = 0, drag = null;
+    function apply() {
+      im.style.transform = 'translate(' + tx + 'px,' + ty + 'px) scale(' + scale + ')';
+      zoomEl.textContent = Math.round(scale * 100) + '%';
+    }
+    function open(src) {
+      if (!src) return;
+      scale = 1; tx = 0; ty = 0;
+      im.src = src; apply();
+      lb.classList.add('open');
+    }
+    function close() { lb.classList.remove('open'); im.removeAttribute('src'); }
+    window.__openLightbox = open; // e2e 驱动钩子
+
+    // 入口：详情大图（事件委托——bigimg 每次详情打开都重建）
+    document.addEventListener('click', (e) => {
+      if (e.target && e.target.matches && e.target.matches('.bigimg img')) {
+        open(e.target.src);
+        e.preventDefault();
+      }
+    });
+    lb.addEventListener('click', (e) => { if (e.target === lb) close(); });
+    lb.querySelector('.lbClose').onclick = close;
+    im.addEventListener('click', (e) => e.stopPropagation());
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && lb.classList.contains('open')) close();
+    });
+
+    // 滚轮缩放：以指针为不动点（数学：t' = (1-k)·a + k·t，a=指针相对视口中心，
+    // k=新/旧比例；推导按 transform 原点=布局中心=视口中心）
+    lb.addEventListener('wheel', (e) => {
+      if (!lb.classList.contains('open')) return;
+      e.preventDefault();
+      const k = e.deltaY < 0 ? 1.18 : 1 / 1.18;
+      const ns = Math.min(8, Math.max(0.2, scale * k));
+      const real = ns / scale; scale = ns;
+      const ax = e.clientX - window.innerWidth / 2;
+      const ay = e.clientY - window.innerHeight / 2;
+      tx = ax - real * (ax - tx);
+      ty = ay - real * (ay - ty);
+      apply();
+    }, { passive: false });
+
+    // 拖动平移（pointer capture：拖出图片区域仍跟随）
+    im.addEventListener('pointerdown', (e) => {
+      drag = { x: e.clientX, y: e.clientY, tx, ty };
+      im.setPointerCapture(e.pointerId);
+    });
+    im.addEventListener('pointermove', (e) => {
+      if (!drag) return;
+      tx = drag.tx + (e.clientX - drag.x);
+      ty = drag.ty + (e.clientY - drag.y);
+      apply();
+    });
+    im.addEventListener('pointerup', () => { drag = null; });
+    im.addEventListener('pointercancel', () => { drag = null; });
+    im.addEventListener('dblclick', (e) => { e.stopPropagation(); scale = 1; tx = 0; ty = 0; apply(); });
+  })();
 })();
 </script>
 </body>

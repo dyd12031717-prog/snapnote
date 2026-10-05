@@ -817,6 +817,11 @@ function setupIpc() {
     const r = memoStore.addItem({
       type: o.type === 'image' ? 'image' : 'text',
       text: o.type === 'image' ? undefined : String(o.text || ''),
+      // v1.6.1：补透传 image 元数据（此前仅剪贴板捕获通道传全字段，渲染层
+      // 直接 addItem 的图片条目被静默砍成 null——e2e_lightbox 抓获）
+      imageHash: o.imageHash,
+      imageW: o.imageW,
+      imageH: o.imageH,
       categoryId: o.categoryId || null,
       sensitive: !!o.sensitive,
       note: o.note || '',
