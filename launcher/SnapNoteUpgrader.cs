@@ -35,7 +35,8 @@ namespace SnapNoteUpgrader
         static int Main(string[] args)
         {
             bool e2e = args.Any(a => a == "--e2e");
-            string dirArg = args.FirstOrDefault(a => a.StartsWith("--dir="))?.Substring(6);
+            string dirArgRaw = args.FirstOrDefault(a => a.StartsWith("--dir="));
+            string dirArg = dirArgRaw == null ? null : dirArgRaw.Substring(6);
             if (e2e)
             {
                 try { return RunUpgrade(dirArg, null); }
@@ -50,7 +51,7 @@ namespace SnapNoteUpgrader
         // ---------------- 升级主流程（UI 与 e2e 共用） ----------------
         public static int RunUpgrade(string dirArg, Action<string> log)
         {
-            void L(string m) { log?.Invoke(m); Console.WriteLine(m); }
+            Action<string> L = delegate(string m) { if (log != null) log(m); Console.WriteLine(m); };
             string appRoot = ResolveInstallDir(dirArg, L);
             if (appRoot == null) { L("✕ 未找到 SnapNote 安装目录"); return 2; }
             L("安装目录：" + appRoot);
@@ -61,7 +62,7 @@ namespace SnapNoteUpgrader
             string logFile = Path.Combine(appRoot, ".update-work", "upgrader-log.txt");
             try { Directory.CreateDirectory(Path.GetDirectoryName(logFile)); } catch { /* 忽略 */ }
 
-            int WriteResult(string tail)
+            Func<string, int> WriteResult = delegate(string tail)
             {
                 // 步骤 7 会删 .update-work 残留——结尾落盘前必须重建目录
                 // （否则 AppendAllText 抛 DirectoryNotFoundException 被吞，日志丢失）
@@ -72,7 +73,7 @@ namespace SnapNoteUpgrader
                 }
                 catch { /* 尽力 */ }
                 return 0;
-            }
+            };
 
             try
             {
@@ -216,8 +217,12 @@ namespace SnapNoteUpgrader
             for (int i = 0; ; i++)
             {
                 try { Directory.Delete(dir, true); return; }
-                catch (Exception e) when (i < 4 && (e is IOException || e is UnauthorizedAccessException))
-                { L("（目录被占用，" + (i + 1) * 2 + " 秒后重试：" + e.Message + "）"); Thread.Sleep((i + 1) * 2000); }
+                catch (Exception e)
+                {
+                    if (i >= 4 || !(e is IOException || e is UnauthorizedAccessException)) throw;
+                    L("（目录被占用，" + (i + 1) * 2 + " 秒后重试：" + e.Message + "）");
+                    Thread.Sleep((i + 1) * 2000);
+                }
             }
         }
 
@@ -236,8 +241,12 @@ namespace SnapNoteUpgrader
             for (int i = 0; ; i++)
             {
                 try { Directory.Move(src, dst); return; }
-                catch (Exception e) when (i < 4 && (e is IOException || e is UnauthorizedAccessException))
-                { L("（挪移受阻（杀软扫描锁常见），" + (i + 1) * 2 + " 秒后重试）"); Thread.Sleep((i + 1) * 2000); }
+                catch (Exception e)
+                {
+                    if (i >= 4 || !(e is IOException || e is UnauthorizedAccessException)) throw;
+                    L("（挪移受阻（杀软扫描锁常见），" + (i + 1) * 2 + " 秒后重试）");
+                    Thread.Sleep((i + 1) * 2000);
+                }
             }
         }
 
@@ -246,8 +255,12 @@ namespace SnapNoteUpgrader
             for (int i = 0; ; i++)
             {
                 try { CopyDir(src, dst); return; }
-                catch (Exception e) when (i < 3 && (e is IOException || e is UnauthorizedAccessException))
-                { L("（复制受阻（杀软扫描锁常见），" + (i + 1) * 2 + " 秒后重试）"); Thread.Sleep((i + 1) * 2000); }
+                catch (Exception e)
+                {
+                    if (i >= 3 || !(e is IOException || e is UnauthorizedAccessException)) throw;
+                    L("（复制受阻（杀软扫描锁常见），" + (i + 1) * 2 + " 秒后重试）");
+                    Thread.Sleep((i + 1) * 2000);
+                }
             }
         }
 
